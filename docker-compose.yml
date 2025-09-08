@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 데이터베이스
+  postgres:
+    image: postgres:15-alpine
+    container_name: agenticcp-agent-postgres
+    environment:
+      POSTGRES_DB: agenticcp_agent
+      POSTGRES_USER: agenticcp
+      POSTGRES_PASSWORD: agenticcp123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d
+    networks:
+      - agenticcp-network
+
+  # Redis (캐싱 및 세션)
+  redis:
+    image: redis:7-alpine
+    container_name: agenticcp-agent-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - agenticcp-network
+
+  # AgenticCP Agent 애플리케이션
+  agent:
+    build: .
+    container_name: agenticcp-agent
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://agenticcp:agenticcp123@postgres:5432/agenticcp_agent
+      - DATABASE_URL_SYNC=postgresql://agenticcp:agenticcp123@postgres:5432/agenticcp_agent
+      - REDIS_URL=redis://redis:6379/0
+      - ENVIRONMENT=development
+      - DEBUG=true
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - agenticcp-network
+    restart: unless-stopped
+
+  # 개발용 데이터베이스 관리 도구
+  adminer:
+    image: adminer:4.8.1
+    container_name: agenticcp-agent-adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    networks:
+      - agenticcp-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  agenticcp-network:
+    driver: bridge

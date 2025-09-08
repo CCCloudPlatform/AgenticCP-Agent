@@ -1,0 +1,25 @@
+# 개발 환경 의존성
+-r requirements.txt
+
+# 개발 도구
+black==23.11.0
+isort==5.12.0
+flake8==6.1.0
+mypy==1.7.1
+pre-commit==3.6.0
+
+# 테스트 도구
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+factory-boy==3.3.0
+
+# 문서화
+mkdocs==1.5.3
+mkdocs-material==9.4.8
+mkdocs-swagger-ui-tag==0.6.8
+
+# 디버깅
+ipdb==0.13.13
+rich==13.7.0
