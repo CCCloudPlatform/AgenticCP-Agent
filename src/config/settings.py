@@ -188,3 +188,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """설정 인스턴스 반환 (캐시됨)"""
     return Settings()
+

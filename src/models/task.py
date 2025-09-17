@@ -107,3 +107,4 @@ class Task(Base):
     def can_be_retried(self) -> bool:
         """재시도 가능 여부"""
         return self.status in [TaskStatus.FAILED, TaskStatus.TIMEOUT]
+

@@ -184,3 +184,4 @@ class AgentService(BaseService[Agent, AgentCreate, AgentUpdate]):
             await self._delete_from_cache(cache_key)
         
         return success
+

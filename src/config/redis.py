@@ -113,3 +113,4 @@ class CacheService:
 def get_cache_service() -> CacheService:
     """캐시 서비스 의존성"""
     return CacheService(redis_manager.client)
+

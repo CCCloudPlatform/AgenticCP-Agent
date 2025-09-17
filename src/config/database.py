@@ -107,3 +107,4 @@ def get_sync_session() -> Generator[sessionmaker, None, None]:
         raise
     finally:
         session.close()
+

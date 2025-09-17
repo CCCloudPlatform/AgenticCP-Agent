@@ -128,3 +128,4 @@ async def system_info(
 ) -> dict:
     """시스템 정보 조회"""
     return await health_service.get_system_info()
+

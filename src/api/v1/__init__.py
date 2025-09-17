@@ -14,3 +14,4 @@ api_router.include_router(tasks_router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(health_router, prefix="/health", tags=["health"])
 
 __all__ = ["api_router"]
+

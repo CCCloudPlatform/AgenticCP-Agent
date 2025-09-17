@@ -102,3 +102,4 @@ class HealthCheckResponse(BaseModel):
         json_encoders = {
             datetime: lambda v: v.isoformat()
         }
+

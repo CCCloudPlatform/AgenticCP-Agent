@@ -138,3 +138,4 @@ class BaseService(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         if self.cache:
             return await self.cache.delete(key)
         return False
+
