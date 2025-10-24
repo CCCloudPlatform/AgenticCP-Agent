@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 데이터베이스 (프로덕션용)
+  postgres:
+    image: postgres:15-alpine
+    container_name: ${POSTGRES_CONTAINER_NAME:-agenticcp-agent-postgres-prod}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d
+    networks:
+      - agenticcp-prod-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis (프로덕션용)
+  redis:
+    image: redis:7-alpine
+    container_name: ${REDIS_CONTAINER_NAME:-agenticcp-agent-redis-prod}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_prod_data:/data
+    networks:
+      - agenticcp-prod-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # AgenticCP Agent 애플리케이션 (프로덕션용)
+  agent:
+    build: .
+    container_name: ${AGENT_CONTAINER_NAME:-agenticcp-agent-prod}
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - DATABASE_URL_SYNC=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/0
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - HOST=${HOST:-0.0.0.0}
+      - PORT=${PORT:-8000}
+      - SECRET_KEY=${SECRET_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      - MULTI_AGENT_LLM_PROVIDER=${MULTI_AGENT_LLM_PROVIDER:-bedrock}
+      - MULTI_AGENT_OPENAI_API_KEY=${MULTI_AGENT_OPENAI_API_KEY}
+      - MULTI_AGENT_OPENAI_MODEL=${MULTI_AGENT_OPENAI_MODEL:-gpt-4o-mini}
+      - MULTI_AGENT_BEDROCK_MODEL_ID=${MULTI_AGENT_BEDROCK_MODEL_ID:-amazon.titan-embed-text-v2:0}
+      - MULTI_AGENT_AWS_ACCESS_KEY_ID=${MULTI_AGENT_AWS_ACCESS_KEY_ID}
+      - MULTI_AGENT_AWS_SECRET_ACCESS_KEY=${MULTI_AGENT_AWS_SECRET_ACCESS_KEY}
+      - MULTI_AGENT_AWS_REGION=${MULTI_AGENT_AWS_REGION:-ap-northeast-2}
+    ports:
+      - "${AGENT_PORT:-8000}:8000"
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agenticcp-prod-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  postgres_prod_data:
+  redis_prod_data:
+
+networks:
+  agenticcp-prod-network:
+    driver: bridge
