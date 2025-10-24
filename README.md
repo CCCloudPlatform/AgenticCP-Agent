@@ -28,7 +28,7 @@ alembic upgrade head
 uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Docker 환경
+### 🐳 Docker 환경
 
 #### 개발 환경
 
@@ -47,6 +47,12 @@ docker-compose -f docker-compose.dev.yml logs -f agent
 docker-compose -f docker-compose.dev.yml down
 ```
 
+**개발 환경 특징:**
+- 🔧 **Hot Reload**: 소스 코드 변경 시 자동 재시작
+- 🗄️ **Adminer**: 데이터베이스 관리 도구 (http://localhost:8080)
+- 📊 **Debug 로그**: 상세한 디버깅 정보 제공
+- 🔄 **볼륨 마운트**: 로컬 소스 코드와 실시간 동기화
+
 #### 프로덕션 환경
 
 ```bash
@@ -62,6 +68,43 @@ docker-compose -f docker-compose.prod.yml ps
 
 # 로그 확인
 docker-compose -f docker-compose.prod.yml logs -f agent
+```
+
+**프로덕션 환경 특징:**
+- 🚀 **최적화된 빌드**: 멀티스테이지 빌드로 이미지 크기 최소화
+- 🔒 **보안 강화**: 프로덕션용 시크릿 키 및 환경 변수
+- 📈 **성능 모니터링**: 프로덕션 로그 레벨 및 메트릭 수집
+- 🛡️ **헬스체크**: 자동 복구 및 상태 모니터링
+
+#### Docker 서비스 구성
+
+| 서비스 | 포트 | 설명 |
+|--------|------|------|
+| **agent** | 8000 | AgenticCP Agent 애플리케이션 |
+| **postgres** | 5432 | PostgreSQL 데이터베이스 |
+| **redis** | 6379 | Redis 캐시 및 세션 저장소 |
+| **adminer** | 8080 | 데이터베이스 관리 도구 (개발용) |
+
+#### Docker 명령어 참조
+
+```bash
+# 특정 서비스만 실행
+docker-compose up postgres redis
+
+# 백그라운드에서 실행
+docker-compose up -d
+
+# 로그 실시간 확인
+docker-compose logs -f agent
+
+# 서비스 재시작
+docker-compose restart agent
+
+# 볼륨 및 네트워크 포함 완전 정리
+docker-compose down -v --remove-orphans
+
+# 이미지 재빌드
+docker-compose build --no-cache agent
 ```
 
 #### 기본 Docker Compose (환경변수 기반)
@@ -145,7 +188,6 @@ python -m src.cli.multi_agent_cli --thread-id user-123
 - **요청 처리**: `POST /api/v1/multi-agent/process`
 - **비동기 요청**: `POST /api/v1/multi-agent/process-async`
 - **대화 기록**: `GET /api/v1/multi-agent/conversation-history/{thread_id}`
-- **그래프 상태**: `GET /api/v1/multi-agent/graph-state/{thread_id}`
 - **EC2 직접 요청**: `POST /api/v1/multi-agent/ec2/direct`
 - **시스템 상태**: `GET /api/v1/multi-agent/health`
 - **에이전트 정보**: `GET /api/v1/multi-agent/agents/info`

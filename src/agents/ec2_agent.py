@@ -10,7 +10,7 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_aws import ChatBedrock
 from langchain_core.tools import BaseTool, tool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -20,8 +20,6 @@ from langchain_core.callbacks import CallbackManagerForToolRun
 import requests
 import boto3
 from botocore.exceptions import ClientError
-
-from .bedrock_llm import BedrockChatLLM
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -256,25 +254,16 @@ class EC2Agent:
     """LangChain을 사용한 EC2 Mini Agent (LangGraph 호환)"""
     
     def __init__(self, settings, aws_access_key: str = None, aws_secret_key: str = None, region: str = "us-east-1"):
-        # LLM Provider 설정에 따라 LLM 초기화
-        if settings.llm_provider.lower() == "bedrock":
-            self.llm = BedrockChatLLM(
-                model_id=settings.bedrock_model_id,
-                temperature=settings.bedrock_temperature,
-                max_tokens=settings.bedrock_max_tokens,
-                aws_access_key_id=aws_access_key or settings.aws_access_key_id,
-                aws_secret_access_key=aws_secret_key or settings.aws_secret_access_key,
-                aws_region=region or settings.aws_region
-            )
-            logger.info(f"EC2 Agent - Bedrock LLM 초기화 완료: {settings.bedrock_model_id}")
-        else:
-            # OpenAI 사용 (기본값)
-            self.llm = ChatOpenAI(
-                model=settings.openai_model,
-                api_key=settings.openai_api_key,
-                temperature=settings.openai_temperature
-            )
-            logger.info(f"EC2 Agent - OpenAI LLM 초기화 완료: {settings.openai_model}")
+        # LLM Provider 설정에 따라 LLM 초기화 (Bedrock 전용)
+        self.llm = ChatBedrock(
+            model_id=settings.multi_agent.bedrock_model_id,
+            temperature=settings.multi_agent.bedrock_temperature,
+            max_tokens=settings.multi_agent.bedrock_max_tokens,
+            aws_access_key_id=aws_access_key or settings.multi_agent.aws_access_key_id,
+            aws_secret_access_key=aws_secret_key or settings.multi_agent.aws_secret_access_key,
+            region_name=region or settings.multi_agent.aws_region
+        )
+        logger.info(f"EC2 Agent - Bedrock LLM 초기화 완료: {settings.multi_agent.bedrock_model_id}")
         
         # AWS CC 도구 초기화
         self.aws_tool = AWSCCTool(aws_access_key, aws_secret_key, region)
@@ -316,7 +305,7 @@ class EC2Agent:
         # JSON 파서 설정
         self.json_parser = JsonOutputParser()
     
-    def process_request(self, user_request: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+    async def process_request(self, user_request: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
         """사용자 요청을 처리하는 메인 메서드"""
         logger.info(f"EC2 Agent 요청 처리 시작: {user_request[:50]}...")
         
