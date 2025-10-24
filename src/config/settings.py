@@ -14,8 +14,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class DatabaseSettings(BaseSettings):
     """데이터베이스 설정"""
     
-    url: str = Field(..., description="데이터베이스 URL")
-    url_sync: str = Field(..., description="동기 데이터베이스 URL")
+    url: str = Field(default="postgresql+asyncpg://user:password@localhost:5432/agenticcp_agent", description="데이터베이스 URL")
+    url_sync: str = Field(default="postgresql://user:password@localhost:5432/agenticcp_agent", description="동기 데이터베이스 URL")
     echo: bool = Field(default=False, description="SQL 쿼리 로깅 여부")
     pool_size: int = Field(default=10, description="연결 풀 크기")
     max_overflow: int = Field(default=20, description="최대 오버플로우")
@@ -28,7 +28,7 @@ class DatabaseSettings(BaseSettings):
 class RedisSettings(BaseSettings):
     """Redis 설정"""
     
-    url: str = Field(..., description="Redis URL")
+    url: str = Field(default="redis://localhost:6379/0", description="Redis URL")
     max_connections: int = Field(default=10, description="최대 연결 수")
     socket_timeout: int = Field(default=5, description="소켓 타임아웃")
     socket_connect_timeout: int = Field(default=5, description="소켓 연결 타임아웃")
@@ -39,7 +39,7 @@ class RedisSettings(BaseSettings):
 class JWTSettings(BaseSettings):
     """JWT 설정"""
     
-    secret_key: str = Field(..., description="JWT 시크릿 키")
+    secret_key: str = Field(default="your-secret-key-here-change-in-production", description="JWT 시크릿 키")
     algorithm: str = Field(default="HS256", description="JWT 알고리즘")
     access_token_expire_minutes: int = Field(default=30, description="액세스 토큰 만료 시간(분)")
     refresh_token_expire_days: int = Field(default=7, description="리프레시 토큰 만료 시간(일)")
@@ -91,8 +91,8 @@ class LoggingSettings(BaseSettings):
 class AgentSettings(BaseSettings):
     """에이전트 설정"""
     
-    id: str = Field(..., description="에이전트 ID")
-    name: str = Field(..., description="에이전트 이름")
+    id: str = Field(default="agent-001", description="에이전트 ID")
+    name: str = Field(default="Default Agent", description="에이전트 이름")
     type: str = Field(default="general", description="에이전트 타입")
     max_concurrent_tasks: int = Field(default=10, description="최대 동시 작업 수")
     task_timeout_seconds: int = Field(default=300, description="작업 타임아웃(초)")
@@ -103,12 +103,47 @@ class AgentSettings(BaseSettings):
 class ExternalServiceSettings(BaseSettings):
     """외부 서비스 설정"""
     
-    core_service_url: str = Field(..., description="Core 서비스 URL")
-    core_service_api_key: str = Field(..., description="Core 서비스 API 키")
+    core_service_url: str = Field(default="http://localhost:8080", description="Core 서비스 URL")
+    core_service_api_key: str = Field(default="your-core-service-api-key", description="Core 서비스 API 키")
     timeout: int = Field(default=30, description="요청 타임아웃(초)")
     max_retries: int = Field(default=3, description="최대 재시도 횟수")
     
     model_config = SettingsConfigDict(env_prefix="EXTERNAL_SERVICE_")
+
+
+class MultiAgentSettings(BaseSettings):
+    """Multi-Agent System 설정"""
+    
+    # LLM Provider 설정
+    llm_provider: str = Field(default="bedrock", description="LLM 제공자 (openai/bedrock)")
+    
+    # OpenAI 설정 (OpenAI 사용 시)
+    openai_api_key: str = Field(default="your-openai-api-key-here", description="OpenAI API 키")
+    openai_model: str = Field(default="gpt-4o-mini", description="사용할 OpenAI 모델")
+    openai_temperature: float = Field(default=0.1, description="OpenAI 모델 온도")
+    
+    # AWS Bedrock 설정
+    bedrock_model_id: str = Field(default="anthropic.claude-3-haiku-20240307-v1:0", description="Bedrock 모델 ID")
+    bedrock_temperature: float = Field(default=0.1, description="Bedrock 모델 온도")
+    bedrock_max_tokens: int = Field(default=4000, description="Bedrock 최대 토큰 수")
+    bedrock_top_p: float = Field(default=0.9, description="Bedrock Top-P 값")
+    bedrock_top_k: int = Field(default=250, description="Bedrock Top-K 값")
+    
+    # AWS 설정
+    aws_access_key_id: Optional[str] = Field(default=None, description="AWS Access Key ID")
+    aws_secret_access_key: Optional[str] = Field(default=None, description="AWS Secret Access Key")
+    aws_region: str = Field(default="us-east-1", description="AWS 기본 리전")
+    aws_profile: Optional[str] = Field(default=None, description="AWS 프로필 이름")
+    
+    # 대화 관리 설정
+    max_conversation_history: int = Field(default=100, description="최대 대화 기록 수")
+    conversation_timeout: int = Field(default=3600, description="대화 타임아웃 (초)")
+    
+    # EC2 Agent 설정
+    ec2_default_instance_type: str = Field(default="t2.micro", description="기본 EC2 인스턴스 타입")
+    ec2_default_ami: str = Field(default="ami-0abcdef1234567890", description="기본 AMI ID")
+    
+    model_config = SettingsConfigDict(env_prefix="MULTI_AGENT_")
 
 
 class Settings(BaseSettings):
@@ -140,6 +175,7 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     external_service: ExternalServiceSettings = Field(default_factory=ExternalServiceSettings)
+    multi_agent: MultiAgentSettings = Field(default_factory=MultiAgentSettings)
     
     model_config = SettingsConfigDict(
         env_file=".env",

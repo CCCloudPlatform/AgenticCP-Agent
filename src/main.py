@@ -2,6 +2,8 @@
 AgenticCP Agent 메인 애플리케이션
 
 FastAPI 기반 에이전트 서비스 메인 애플리케이션
+
+Multi-Agent System (LangGraph 기반) 통합
 """
 
 import time
@@ -46,6 +48,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error(f"❌ Redis 연결 실패: {e}")
         # Redis는 선택적이므로 경고만 출력
         logger.warning("⚠️ Redis 연결 실패 - 캐싱 기능이 비활성화됩니다")
+    
+    # Multi-Agent System 초기화
+    try:
+        logger.info("🤖 Multi-Agent System 초기화 중...")
+        from .api.v1.multi_agent import get_multi_agent_system
+        
+        # 시스템 초기화
+        multi_agent_system = get_multi_agent_system()
+        success = await multi_agent_system.initialize()
+        if success:
+            logger.info("✅ Multi-Agent System 초기화 성공")
+        else:
+            logger.warning("⚠️ Multi-Agent System 초기화 실패 - 일부 기능이 제한될 수 있습니다")
+            
+    except Exception as e:
+        logger.error(f"❌ Multi-Agent System 초기화 실패: {e}")
+        logger.warning("⚠️ Multi-Agent System 기능이 비활성화됩니다")
     
     logger.info("🎉 AgenticCP Agent 서비스 시작 완료!")
     
@@ -103,7 +122,21 @@ def create_app() -> FastAPI:
             "message": "AgenticCP Agent API",
             "version": settings.app_version,
             "environment": settings.environment,
-            "docs_url": "/docs" if settings.is_development else None
+            "docs_url": "/docs" if settings.is_development else None,
+            "features": {
+                "multi_agent_system": True,
+                "langgraph_integration": True,
+                "supervisor_agent": True,
+                "ec2_agent": True,
+                "conversation_management": True,
+                "streaming_support": True
+            },
+            "api_endpoints": {
+                "multi_agent_chat": "/api/v1/multi-agent/chat",
+                "multi_agent_status": "/api/v1/multi-agent/status",
+                "multi_agent_history": "/api/v1/multi-agent/history/{thread_id}",
+                "available_agents": "/api/v1/multi-agent/agents"
+            }
         }
     
     # 전역 예외 처리기

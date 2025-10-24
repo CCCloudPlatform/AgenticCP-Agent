@@ -61,6 +61,9 @@ docker-compose logs -f agent
 - **자동 할당**: 사용 가능한 에이전트에 작업 자동 할당
 - **실시간 모니터링**: 에이전트 및 작업 상태 실시간 추적
 - **헬스체크**: 시스템 및 의존성 상태 모니터링
+- **Multi-Agent System**: LangGraph 기반 Supervisor Agent와 EC2 Mini Agent 통합
+- **자연어 처리**: OpenAI GPT-4o-mini를 활용한 자연어 요청 처리
+- **AWS 통합**: EC2 인스턴스 관리 및 AWS 리소스 조작
 
 ## 🧪 테스트
 
@@ -80,6 +83,45 @@ pytest tests/test_agents.py
 - **헬스체크**: `GET /api/v1/health`
 - **메트릭**: `GET /metrics` (설정 시)
 - **로그**: `logs/agent.log`
+
+## 🤖 Multi-Agent System
+
+### CLI 도구 사용법
+
+```bash
+# CLI 도구 실행
+python -m src.cli.multi_agent_cli
+
+# 환경 변수 파일 지정
+python -m src.cli.multi_agent_cli --env-file .env
+
+# 특정 Thread ID 사용
+python -m src.cli.multi_agent_cli --thread-id user-123
+```
+
+### API 엔드포인트
+
+- **요청 처리**: `POST /api/v1/multi-agent/process`
+- **비동기 요청**: `POST /api/v1/multi-agent/process-async`
+- **대화 기록**: `GET /api/v1/multi-agent/conversation-history/{thread_id}`
+- **그래프 상태**: `GET /api/v1/multi-agent/graph-state/{thread_id}`
+- **EC2 직접 요청**: `POST /api/v1/multi-agent/ec2/direct`
+- **시스템 상태**: `GET /api/v1/multi-agent/health`
+- **에이전트 정보**: `GET /api/v1/multi-agent/agents/info`
+
+### 사용 예시
+
+```bash
+# EC2 인스턴스 목록 조회
+curl -X POST "http://localhost:8000/api/v1/multi-agent/process" \
+  -H "Content-Type: application/json" \
+  -d '{"user_request": "EC2 인스턴스 목록을 보여줘"}'
+
+# 일반 대화
+curl -X POST "http://localhost:8000/api/v1/multi-agent/process" \
+  -H "Content-Type: application/json" \
+  -d '{"user_request": "안녕하세요"}'
+```
 
 ## 🤝 기여하기
 
