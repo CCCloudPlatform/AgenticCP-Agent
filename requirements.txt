@@ -32,16 +32,58 @@ email-validator==2.1.0
 pytest==7.4.3
 pytest-asyncio==0.21.1
 pytest-cov==4.1.0
-httpx==0.25.2  # 테스트용 HTTP 클라이언트
 
 # 개발 도구
 black==23.11.0
 isort==5.12.0
 flake8==6.1.0
 mypy==1.7.1
-pre-commit==3.6.0
+# pre-commit 3.6.0 has no matching wheel for some Windows/Python combos; pin to 3.5.0
+pre-commit==3.5.0
 
 # 문서화
 mkdocs==1.5.3
 mkdocs-material==9.4.8
+
+# Multi-Agent System 의존성
+# LangChain and workflow related (specific versions to avoid conflicts)
+langchain-core==0.1.52
+langchain==0.1.0
+langchain-openai==0.0.8
+langchain-community==0.0.38
+langchain-experimental==0.0.65
+
+# LangGraph for agent orchestration (specific versions)
+langgraph==0.6.11
+langgraph-checkpoint==2.1.2
+langgraph-prebuilt==0.6.5
+langgraph-sdk==0.2.9
+langsmith==0.0.77
+
+# OpenAI API
+openai==2.6.0
+
+# AWS related
+boto3==1.40.56
+botocore==1.40.56
+awscli==1.42.56
+
+# Data processing
+numpy==2.0.2
+pandas==2.3.3
+
+# JSON processing and parsing
+jsonschema==4.25.1
+
+# Asynchronous processing
+asyncio-mqtt==0.16.2
+aiofiles==25.1.0
+
+# Utilities for Multi-Agent
+click==8.1.8
+rich==14.2.0
+typer==0.20.0
+
+# Security
+cryptography==46.0.3
 

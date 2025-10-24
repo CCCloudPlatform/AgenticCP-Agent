@@ -4,11 +4,12 @@
 에이전트가 수행하는 작업을 관리하는 모델
 """
 
+from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from sqlalchemy import Column, Enum as SQLEnum, String, Text, Integer, ForeignKey, DateTime
-from sqlalchemy.orm import relationship
+from sqlalchemy import Enum as SQLEnum, String, Text, Integer, ForeignKey, DateTime
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
 
@@ -38,10 +39,10 @@ class Task(Base):
     __tablename__ = "tasks"
     
     # 기본 정보
-    task_id = Column(String(100), unique=True, nullable=False, index=True, comment="작업 ID")
-    name = Column(String(200), nullable=False, comment="작업 이름")
-    description = Column(Text, nullable=True, comment="작업 설명")
-    task_type = Column(
+    task_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True, comment="작업 ID")
+    name: Mapped[str] = mapped_column(String(200), nullable=False, comment="작업 이름")
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="작업 설명")
+    task_type: Mapped[TaskType] = mapped_column(
         SQLEnum(TaskType), 
         nullable=False, 
         default=TaskType.CUSTOM,
@@ -49,30 +50,30 @@ class Task(Base):
     )
     
     # 상태 정보
-    status = Column(
+    status: Mapped[TaskStatus] = mapped_column(
         SQLEnum(TaskStatus), 
         nullable=False, 
         default=TaskStatus.PENDING,
         comment="작업 상태"
     )
-    priority = Column(Integer, nullable=False, default=5, comment="우선순위 (1-10)")
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=5, comment="우선순위 (1-10)")
     
     # 입력/출력 데이터
-    input_data = Column(Text, nullable=True, comment="입력 데이터 (JSON)")
-    output_data = Column(Text, nullable=True, comment="출력 데이터 (JSON)")
-    error_message = Column(Text, nullable=True, comment="오류 메시지")
+    input_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="입력 데이터 (JSON)")
+    output_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="출력 데이터 (JSON)")
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="오류 메시지")
     
     # 실행 정보
-    started_at = Column(DateTime(timezone=True), nullable=True, comment="시작 시간")
-    completed_at = Column(DateTime(timezone=True), nullable=True, comment="완료 시간")
-    timeout_seconds = Column(Integer, nullable=True, comment="타임아웃(초)")
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, comment="시작 시간")
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, comment="완료 시간")
+    timeout_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="타임아웃(초)")
     
     # 진행률
-    progress = Column(Integer, nullable=False, default=0, comment="진행률 (0-100)")
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="진행률 (0-100)")
     
     # 관계
-    agent_id = Column(Integer, ForeignKey("agents.id"), nullable=True, comment="에이전트 ID")
-    agent = relationship("Agent", back_populates="tasks")
+    agent_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("agents.id"), nullable=True, comment="에이전트 ID")
+    agent: Mapped[Optional["Agent"]] = relationship("Agent", back_populates="tasks")
     
     def __repr__(self) -> str:
         """문자열 표현"""

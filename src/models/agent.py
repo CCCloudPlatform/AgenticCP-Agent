@@ -7,8 +7,8 @@
 from enum import Enum
 from typing import List, Optional
 
-from sqlalchemy import Column, Enum as SQLEnum, String, Text, Boolean, Integer
-from sqlalchemy.orm import relationship
+from sqlalchemy import Enum as SQLEnum, String, Text, Boolean, Integer
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
 
@@ -27,36 +27,36 @@ class Agent(Base):
     __tablename__ = "agents"
     
     # 기본 정보
-    agent_id = Column(String(100), unique=True, nullable=False, index=True, comment="에이전트 ID")
-    name = Column(String(200), nullable=False, comment="에이전트 이름")
-    description = Column(Text, nullable=True, comment="에이전트 설명")
-    agent_type = Column(String(50), nullable=False, default="general", comment="에이전트 타입")
+    agent_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True, comment="에이전트 ID")
+    name: Mapped[str] = mapped_column(String(200), nullable=False, comment="에이전트 이름")
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="에이전트 설명")
+    agent_type: Mapped[str] = mapped_column(String(50), nullable=False, default="general", comment="에이전트 타입")
     
     # 상태 정보
-    status = Column(
+    status: Mapped[AgentStatus] = mapped_column(
         SQLEnum(AgentStatus), 
         nullable=False, 
         default=AgentStatus.ACTIVE,
         comment="에이전트 상태"
     )
-    is_enabled = Column(Boolean, nullable=False, default=True, comment="활성화 여부")
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, comment="활성화 여부")
     
     # 설정 정보
-    max_concurrent_tasks = Column(Integer, nullable=False, default=10, comment="최대 동시 작업 수")
-    task_timeout_seconds = Column(Integer, nullable=False, default=300, comment="작업 타임아웃(초)")
-    config = Column(Text, nullable=True, comment="에이전트 설정 (JSON)")
+    max_concurrent_tasks: Mapped[int] = mapped_column(Integer, nullable=False, default=10, comment="최대 동시 작업 수")
+    task_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=300, comment="작업 타임아웃(초)")
+    config: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="에이전트 설정 (JSON)")
     
     # 연결 정보
-    host = Column(String(255), nullable=True, comment="호스트")
-    port = Column(Integer, nullable=True, comment="포트")
-    endpoint = Column(String(500), nullable=True, comment="엔드포인트")
+    host: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, comment="호스트")
+    port: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="포트")
+    endpoint: Mapped[Optional[str]] = mapped_column(String(500), nullable=True, comment="엔드포인트")
     
     # 메타데이터
-    version = Column(String(50), nullable=True, comment="에이전트 버전")
-    last_heartbeat = Column(String(50), nullable=True, comment="마지막 하트비트")
+    version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, comment="에이전트 버전")
+    last_heartbeat: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, comment="마지막 하트비트")
     
     # 관계
-    tasks = relationship("Task", back_populates="agent", cascade="all, delete-orphan")
+    tasks: Mapped[List["Task"]] = relationship("Task", back_populates="agent", cascade="all, delete-orphan")
     
     def __repr__(self) -> str:
         """문자열 표현"""

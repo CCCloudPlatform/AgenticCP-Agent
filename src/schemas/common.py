@@ -48,7 +48,7 @@ class PaginationParams(BaseModel):
     page: int = Field(1, ge=1, description="페이지 번호")
     size: int = Field(20, ge=1, le=100, description="페이지 크기")
     sort_by: Optional[str] = Field(None, description="정렬 기준")
-    sort_order: str = Field("asc", regex="^(asc|desc)$", description="정렬 순서")
+    sort_order: str = Field("asc", pattern="^(asc|desc)$", description="정렬 순서")
     
     @property
     def offset(self) -> int:
