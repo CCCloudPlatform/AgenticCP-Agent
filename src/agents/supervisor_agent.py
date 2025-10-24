@@ -13,7 +13,7 @@ from datetime import datetime
 import asyncio
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
-from langchain_openai import ChatOpenAI
+from langchain_aws import ChatBedrock
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.tools import Tool
@@ -23,7 +23,6 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from .agent_factory import AgentFactory
-from .bedrock_llm import BedrockChatLLM
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -60,25 +59,16 @@ class SupervisorAgent:
     """LangGraph를 사용한 Supervisor Agent"""
     
     def __init__(self, settings, aws_access_key: str = None, aws_secret_key: str = None, region: str = "us-east-1"):
-        # LLM Provider 설정에 따라 LLM 초기화
-        if settings.llm_provider.lower() == "bedrock":
-            self.llm = BedrockChatLLM(
-                model_id=settings.bedrock_model_id,
-                temperature=settings.bedrock_temperature,
-                max_tokens=settings.bedrock_max_tokens,
-                aws_access_key_id=aws_access_key or settings.aws_access_key_id,
-                aws_secret_access_key=aws_secret_key or settings.aws_secret_access_key,
-                aws_region=region or settings.aws_region
-            )
-            logger.info(f"Bedrock LLM 초기화 완료: {settings.bedrock_model_id}")
-        else:
-            # OpenAI 사용 (기본값)
-            self.llm = ChatOpenAI(
-                model=settings.openai_model,
-                api_key=settings.openai_api_key,
-                temperature=settings.openai_temperature
-            )
-            logger.info(f"OpenAI LLM 초기화 완료: {settings.openai_model}")
+        # LLM Provider 설정에 따라 LLM 초기화 (Bedrock 전용)
+        self.llm = ChatBedrock(
+            model_id=settings.bedrock_model_id,
+            temperature=settings.bedrock_temperature,
+            max_tokens=settings.bedrock_max_tokens,
+            aws_access_key_id=aws_access_key or settings.aws_access_key_id,
+            aws_secret_access_key=aws_secret_key or settings.aws_secret_access_key,
+            region_name=region or settings.aws_region
+        )
+        logger.info(f"Bedrock LLM 초기화 완료: {settings.bedrock_model_id}")
         
         # AWS 자격 증명 저장
         self.aws_access_key = aws_access_key

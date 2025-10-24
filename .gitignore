@@ -137,6 +137,10 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+.env.dev
+.env.prod
+.env.local
+.env.backup
 .venv
 env/
 venv/
@@ -205,3 +209,15 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Docker
+docker-compose.override.yml
+docker-compose.local.yml
+
+# Logs
+logs/
+*.log
+
+# Database backups
+*.sql
+*.dump

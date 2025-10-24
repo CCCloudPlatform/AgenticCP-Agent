@@ -61,6 +61,14 @@ class CORSSettings(BaseSettings):
     def parse_origins(cls, v):
         """문자열 리스트를 파싱"""
         if isinstance(v, str):
+            # JSON 배열 형태인지 확인
+            if v.startswith('[') and v.endswith(']'):
+                try:
+                    import json
+                    return json.loads(v)
+                except json.JSONDecodeError:
+                    pass
+            # 쉼표로 구분된 문자열인 경우
             return [origin.strip() for origin in v.split(",")]
         return v
 

@@ -11,7 +11,6 @@ from abc import ABC, abstractmethod
 from .ec2_agent import EC2Agent
 from .s3_agent import S3Agent
 from .vpc_agent import VPCAgent
-from .bedrock_llm import BedrockChatLLM
 
 logger = logging.getLogger(__name__)
 
