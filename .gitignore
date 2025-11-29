@@ -221,3 +221,9 @@ logs/
 # Database backups
 *.sql
 *.dump
+
+# AWS CLI v2 installation bundle (should be downloaded separately)
+aws/
+
+# Build and deployment scripts
+scripts/

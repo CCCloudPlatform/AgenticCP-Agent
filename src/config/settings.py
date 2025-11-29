@@ -132,6 +132,7 @@ class MultiAgentSettings(BaseSettings):
     
     # AWS Bedrock 설정
     bedrock_model_id: str = Field(default="anthropic.claude-3-haiku-20240307-v1:0", description="Bedrock 모델 ID")
+    bedrock_embedding_model_id: str = Field(default="amazon.titan-embed-text-v2:0", description="Bedrock 임베딩 모델 ID")
     bedrock_temperature: float = Field(default=0.1, description="Bedrock 모델 온도")
     bedrock_max_tokens: int = Field(default=4000, description="Bedrock 최대 토큰 수")
     bedrock_top_p: float = Field(default=0.9, description="Bedrock Top-P 값")
@@ -150,6 +151,11 @@ class MultiAgentSettings(BaseSettings):
     # EC2 Agent 설정
     ec2_default_instance_type: str = Field(default="t2.micro", description="기본 EC2 인스턴스 타입")
     ec2_default_ami: str = Field(default="ami-0abcdef1234567890", description="기본 AMI ID")
+    
+    # Intent Classification 설정
+    use_embedding_intent: bool = Field(default=True, description="Embedding 기반 의도 분류 사용 여부")
+    embedding_model_name: str = Field(default="jhgan/ko-sroberta-multitask", description="Embedding 모델 이름")
+    intent_similarity_threshold: float = Field(default=0.65, description="의도 분류 최소 유사도 임계값")
     
     model_config = SettingsConfigDict(env_prefix="MULTI_AGENT_")
 
