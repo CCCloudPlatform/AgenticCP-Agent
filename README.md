@@ -4,6 +4,54 @@ Python FastAPI 기반 에이전트 서비스
 
 ## 🚀 빠른 시작
 
+### 로컬 개발 환경 실행
+
+프로젝트를 로컬에서 실행하는 방법은 여러 가지가 있습니다:
+
+#### 방법 1: run.py 스크립트 사용 (권장)
+
+```bash
+# 프로젝트 루트에서 실행
+python run.py
+```
+
+**장점:**
+- 프로젝트 루트에서 바로 실행 가능
+- 설정 자동 로드
+- 간단한 명령어
+
+#### 방법 2: uvicorn 직접 실행
+
+```bash
+# 프로젝트 루트에서 실행
+uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+#### 방법 3: run.sh 스크립트 사용 (WSL/Linux/Mac)
+
+```bash
+# 실행 권한 부여 (처음 한 번만)
+chmod +x run.sh
+
+# 스크립트 실행
+./run.sh
+```
+
+#### 방법 4: Python 모듈로 실행
+
+```bash
+# 프로젝트 루트에서 실행
+python -m src.main
+```
+
+> **⚠️ 중요**: `src/main.py`를 직접 실행하면 상대 import 오류가 발생합니다. 반드시 프로젝트 루트에서 위의 방법 중 하나를 사용하세요.
+
+**서버 실행 후 접근 가능한 주소:**
+- 🌐 API 서버: http://localhost:8000
+- 📚 Swagger UI (API 문서): http://localhost:8000/docs
+- 📖 ReDoc (API 문서): http://localhost:8000/redoc
+- ❤️ 헬스체크: http://localhost:8000/api/v1/health
+
 ### 개발 환경 설정
 
 ```bash
@@ -24,8 +72,15 @@ cp env.example .env
 # 데이터베이스 마이그레이션
 alembic upgrade head
 
-# 개발 서버 실행
+# 개발 서버 실행 (방법 1: uvicorn 직접 실행)
 uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+
+# 개발 서버 실행 (방법 2: run.py 스크립트 사용 - 권장)
+python run.py
+
+# 개발 서버 실행 (방법 3: run.sh 스크립트 사용 - WSL/Linux/Mac)
+chmod +x run.sh
+./run.sh
 ```
 
 ### 🐳 Docker 환경
@@ -226,6 +281,32 @@ docker-compose -f docker-compose.dev.yml ps
 
 #### 프로덕션 환경 배포
 
+##### Docker Hub를 사용한 배포 (권장)
+
+```bash
+# 1. 환경변수 설정 (보안 중요!)
+cp env.dockerhub.example .env.prod
+nano .env.prod  # 필수 보안 설정 변경
+
+# 2. Docker Hub 이미지 빌드 및 푸시
+# Windows
+scripts\build-and-push-dockerhub.bat
+
+# Linux/Mac
+./scripts/build-and-push-dockerhub.sh
+
+# 3. 프로덕션 환경 실행
+docker-compose -f docker-compose.prod.yml --env-file .env.prod up -d
+
+# 4. 헬스체크 확인
+curl http://localhost:8000/health
+
+# 5. 서비스 상태 확인
+docker-compose -f docker-compose.prod.yml ps
+```
+
+##### 로컬 빌드를 사용한 배포
+
 ```bash
 # 1. 환경변수 설정 (보안 중요!)
 cp env.prod.example .env.prod
@@ -240,6 +321,8 @@ curl http://localhost:8000/health
 # 4. 서비스 상태 확인
 docker-compose -f docker-compose.prod.yml ps
 ```
+
+> **Docker Hub 배포 상세 가이드**: [Docker Hub 배포 가이드](docs/DOCKERHUB_DEPLOYMENT.md)를 참조하세요.
 
 ### 보안 체크리스트
 
