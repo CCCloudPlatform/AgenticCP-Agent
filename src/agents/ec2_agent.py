@@ -618,23 +618,89 @@ class EC2Agent:
                 return self._analyze_request_rule_based_fallback(user_request)
                 
         except Exception as e:
-            logger.error(f"LLM 기반 요청 분석 중 오류: {e}")
-            # 폴백: 규칙 기반 분석
-            return self._analyze_request_rule_based_fallback(user_request)
+            error_msg = str(e)
+            
+            # 예상된 오류인지 확인 (Bedrock use case form 제출 안 됨)
+            is_expected_error = (
+                "use case details" in error_msg.lower() or
+                "resourcenotfoundexception" in error_msg.lower()
+            )
+            
+            if is_expected_error:
+                logger.debug(
+                    f"LLM 사용 불가 (예상된 오류): Bedrock use case form 미제출. "
+                    f"Embedding 기반 폴백으로 전환합니다."
+                )
+            else:
+                logger.warning(f"LLM 기반 요청 분석 중 오류: {error_msg}")
+            
+            # 하이브리드 폴백: Embedding → Keywords
+            fallback_result = None
+            
+            # 1. Embedding 기반 의도 분류 시도
+            try:
+                from ..utils.intent_classifier import (
+                    classify_intent_hybrid,
+                    map_intent_to_action
+                )
+                
+                intent, classify_method, intent_confidence = classify_intent_hybrid(user_request)
+                if intent and intent_confidence >= 0.65:
+                    action = map_intent_to_action(intent)
+                    if action:
+                        # EC2 관련 액션만 처리
+                        if action.startswith('list_instances') or action == 'list_instances':
+                            fallback_result = {
+                                "action": "list_instances",
+                                "parameters": {},
+                                "reasoning": f"Embedding 기반 폴백: {intent} → {action}",
+                                "confidence": intent_confidence
+                            }
+                        elif action == 'create_instance':
+                            fallback_result = {
+                                "action": "create_instance",
+                                "parameters": {
+                                    "instance_type": "t2.micro",
+                                    "ami_id": "auto"
+                                },
+                                "reasoning": f"Embedding 기반 폴백: {intent} → {action}",
+                                "confidence": intent_confidence
+                            }
+                        elif action in ['stop_instance', 'start_instance', 'terminate_instance']:
+                            instance_ids = self._extract_instance_ids(user_request)
+                            fallback_result = {
+                                "action": action,
+                                "parameters": {
+                                    "InstanceIds": instance_ids if instance_ids else []
+                                },
+                                "reasoning": f"Embedding 기반 폴백: {intent} → {action}",
+                                "confidence": intent_confidence
+                            }
+                        
+                        if fallback_result:
+                            logger.info(
+                                f"✅ Embedding 기반 폴백 성공: '{user_request}' → {intent} → {action} "
+                                f"(신뢰도: {intent_confidence:.2f})"
+                            )
+            except ImportError:
+                logger.warning("Embedding 기반 의도 분류 모듈을 사용할 수 없습니다. 규칙 기반 폴백 사용.")
+            except Exception as embed_error:
+                logger.warning(f"Embedding 기반 의도 분류 실패: {embed_error}. 규칙 기반 폴백 사용.")
+            
+            # 2. Embedding 실패 시 규칙 기반 폴백
+            if not fallback_result:
+                logger.info("규칙 기반 폴백으로 전환하여 요청 분석 시도")
+                fallback_result = self._analyze_request_rule_based_fallback(user_request)
+                logger.info(f"규칙 기반 폴백 결과: {fallback_result.get('action')} - {fallback_result.get('parameters', {})}")
+            
+            return fallback_result
     
     def _analyze_request_rule_based_fallback(self, user_request: str) -> dict:
         """규칙 기반 요청 분석 (폴백용)"""
         user_request_lower = user_request.lower()
         
-        # 인스턴스 목록 조회
-        if any(keyword in user_request_lower for keyword in ["목록", "리스트", "조회", "보여", "list", "show"]):
-            return {
-                "action": "list_instances",
-                "parameters": {}
-            }
-        
         # 인스턴스 생성
-        elif any(keyword in user_request_lower for keyword in ["생성", "만들", "create", "launch"]):
+        if any(keyword in user_request_lower for keyword in ["생성", "만들", "create", "launch"]):
             return {
                 "action": "create_instance",
                 "parameters": {
@@ -653,6 +719,16 @@ class EC2Agent:
                 }
             }
         
+        # 인스턴스 시작
+        elif any(keyword in user_request_lower for keyword in ["시작", "start"]):
+            instance_ids = self._extract_instance_ids(user_request)
+            return {
+                "action": "start_instance",
+                "parameters": {
+                    "InstanceIds": instance_ids if instance_ids else []
+                }
+            }
+        
         # 인스턴스 삭제/종료
         elif any(keyword in user_request_lower for keyword in ["삭제", "지워", "종료", "terminate", "delete", "remove"]):
             instance_ids = self._extract_instance_ids(user_request)
@@ -663,8 +739,31 @@ class EC2Agent:
                 }
             }
         
-        # 기본 응답
+        # 인스턴스 상세 정보 조회 (특정 인스턴스 ID가 있는 경우)
+        elif self._extract_instance_ids(user_request):
+            instance_ids = self._extract_instance_ids(user_request)
+            return {
+                "action": "describe_instance",
+                "parameters": {
+                    "InstanceIds": instance_ids
+                }
+            }
+        
+        # EC2 정보/목록 조회 (기본 동작)
+        # "정보", "알려줘", "목록", "리스트", "조회", "보여" 등의 키워드가 있거나
+        # EC2 관련 요청인데 구체적인 액션이 없는 경우
+        elif any(keyword in user_request_lower for keyword in [
+            "정보", "info", "알려줘", "알려", "보여줘", "보여",
+            "목록", "리스트", "조회", "list", "show", "상태", "status"
+        ]):
+            return {
+                "action": "list_instances",
+                "parameters": {}
+            }
+        
+        # 기본 응답: EC2 관련 요청이지만 구체적인 액션이 없으면 목록 조회
         else:
+            logger.info("구체적인 액션을 찾지 못함, 기본으로 인스턴스 목록 조회")
             return {
                 "action": "list_instances",
                 "parameters": {}

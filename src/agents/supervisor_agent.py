@@ -211,9 +211,80 @@ class SupervisorAgent:
                 logger.info(f"요청 분석 완료 (LLM): {agent_type} - {reasoning} (신뢰도: {confidence:.2f})")
                 
             except Exception as e:
-                logger.error(f"요청 분석 중 오류 발생: {e}")
-                state["next_agent"] = AgentType.GENERAL.value
-                state["context"] = {"error": str(e), "confidence": 0.5, "method": "error_fallback"}
+                error_msg = str(e)
+                
+                # 예상된 오류인지 확인 (Bedrock use case form 제출 안 됨)
+                is_expected_error = (
+                    "use case details" in error_msg.lower() or
+                    "resourcenotfoundexception" in error_msg.lower()
+                )
+                
+                if is_expected_error:
+                    logger.debug(
+                        f"LLM 사용 불가 (예상된 오류): Bedrock use case form 미제출. "
+                        f"Embedding 기반 폴백으로 전환합니다."
+                    )
+                else:
+                    logger.warning(f"요청 분석 중 오류 발생: {e}")
+                
+                # LLM 실패 시 하이브리드 폴백: Embedding → Keywords
+                user_request = state.get("user_request", "")
+                
+                agent_type = None
+                reasoning = ""
+                confidence = 0.5
+                method = "keyword_fallback"
+                
+                # 1. Embedding 기반 의도 분류 시도
+                try:
+                    from ..utils.intent_classifier import (
+                        classify_intent_hybrid,
+                        map_intent_to_agent_type
+                    )
+                    
+                    intent, classify_method, intent_confidence = classify_intent_hybrid(user_request)
+                    if intent:
+                        mapped_agent_type = map_intent_to_agent_type(intent)
+                        if mapped_agent_type:
+                            agent_type = mapped_agent_type
+                            reasoning = f"Embedding 기반 폴백 (LLM 실패): {intent} → {agent_type}"
+                            confidence = intent_confidence
+                            method = f"embedding_{classify_method}"
+                            logger.info(f"Embedding 기반 의도 분류 성공: {intent} → {agent_type} (신뢰도: {confidence:.2f})")
+                except ImportError:
+                    logger.warning("Embedding 기반 의도 분류 모듈을 사용할 수 없습니다. 키워드 폴백 사용.")
+                except Exception as embed_error:
+                    logger.warning(f"Embedding 기반 의도 분류 실패: {embed_error}. 키워드 폴백 사용.")
+                
+                # 2. Embedding 실패 시 키워드 기반 폴백
+                if not agent_type:
+                    user_request_lower = user_request.lower()
+                    
+                    if any(kw in user_request_lower for kw in ["ec2", "인스턴스", "서버", "ami", "ec2 정보", "ec2정보"]):
+                        agent_type = "ec2"
+                        reasoning = f"키워드 기반 폴백 (LLM 실패): EC2 관련 - {str(e)[:100]}"
+                        confidence = 0.8
+                    elif any(kw in user_request_lower for kw in ["s3", "버킷", "객체", "스토리지"]):
+                        agent_type = "s3"
+                        reasoning = f"키워드 기반 폴백 (LLM 실패): S3 관련 - {str(e)[:100]}"
+                        confidence = 0.8
+                    elif any(kw in user_request_lower for kw in ["vpc", "서브넷", "네트워크"]):
+                        agent_type = "vpc"
+                        reasoning = f"키워드 기반 폴백 (LLM 실패): VPC 관련 - {str(e)[:100]}"
+                        confidence = 0.8
+                    else:
+                        agent_type = AgentType.GENERAL.value
+                        reasoning = f"키워드 기반 폴백 (LLM 실패): 일반 요청 - {str(e)[:100]}"
+                        confidence = 0.5
+                
+                state["next_agent"] = agent_type
+                state["routing_result"] = {
+                    "agent_type": agent_type,
+                    "reasoning": reasoning,
+                    "confidence": confidence,
+                    "context": {"method": method, "error": str(e)}
+                }
+                state["context"] = {"error": str(e), "confidence": confidence, "method": method}
             
             return state
         
@@ -490,50 +561,83 @@ AWS 관련 질문이 아닌 일반적인 질문에도 자연스럽게 답변하�
             raise
     
     def _try_fallback_to_titan(self, user_request: str) -> str:
-        """Titan Text 모델로 폴백하여 응답 생성"""
+        """대체 모델로 폴백하여 응답 생성 (Titan Text는 chat 미지원이므로 다른 방법 사용)"""
         try:
-            # Titan Text 모델로 새 LLM 인스턴스 생성
-            fallback_model_id = "amazon.titan-text-express-v1"
-            logger.info(f"Titan Text 모델({fallback_model_id})로 폴백 시도")
+            # Titan Text는 chat을 지원하지 않으므로, 대신 Meta Llama를 시도
+            # 또는 다른 chat을 지원하는 모델 시도
+            fallback_models = [
+                "meta.llama3-8b-instruct-v1:0",
+                "meta.llama3-70b-instruct-v1:0",
+                "amazon.titan-text-express-v1:0",
+            ]
             
-            fallback_llm = ChatBedrock(
-                model_id=fallback_model_id,
-                temperature=self.settings.bedrock_temperature,
-                max_tokens=self.settings.bedrock_max_tokens,
-                aws_access_key_id=self.aws_access_key or self.settings.aws_access_key_id,
-                aws_secret_access_key=self.aws_secret_key or self.settings.aws_secret_access_key,
-                region_name=self.region or self.settings.aws_region
-            )
-            
-            # 시스템 프롬프트 설정
-            system_prompt = """당신은 친절하고 도움이 되는 AI 어시스턴트입니다. 
+            last_error = None
+            for fallback_model_id in fallback_models:
+                try:
+                    logger.info(f"폴백 모델 시도: {fallback_model_id}")
+                    
+                    # Llama 모델인지 확인
+                    is_llama = "llama" in fallback_model_id.lower()
+                    is_titan = "titan" in fallback_model_id.lower()
+                    
+                    if is_llama:
+                        # Llama 모델은 Claude와 유사하게 설정
+                        fallback_llm = ChatBedrock(
+                            model_id=fallback_model_id,
+                            aws_access_key_id=self.aws_access_key or self.settings.aws_access_key_id,
+                            aws_secret_access_key=self.aws_secret_key or self.settings.aws_secret_access_key,
+                            region_name=self.region or self.settings.aws_region,
+                            model_kwargs={
+                                "temperature": self.settings.bedrock_temperature,
+                                "max_gen_len": min(self.settings.bedrock_max_tokens, 2048),
+                            }
+                        )
+                    else:
+                        # Titan Text는 completion 모델이므로 ChatBedrock으로는 사용 불가
+                        logger.warning(f"{fallback_model_id}는 chat을 지원하지 않습니다. 건너뜁니다.")
+                        continue
+                    
+                    # 시스템 프롬프트 설정
+                    system_prompt = """당신은 친절하고 도움이 되는 AI 어시스턴트입니다. 
 사용자의 질문에 정확하고 유용한 답변을 제공하세요. 
 AWS 관련 질문이 아닌 일반적인 질문에도 자연스럽게 답변하세요.
 답변은 간결하고 명확하게 작성하세요."""
+                    
+                    messages = [
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(content=user_request)
+                    ]
+                    
+                    response = fallback_llm.invoke(messages)
+                    
+                    # 응답 추출
+                    if hasattr(response, 'content'):
+                        logger.info(f"폴백 모델 {fallback_model_id} 성공")
+                        return response.content
+                    elif isinstance(response, str):
+                        return response
+                    else:
+                        return str(response)
+                        
+                except Exception as model_error:
+                    logger.warning(f"폴백 모델 {fallback_model_id} 실패: {model_error}")
+                    last_error = model_error
+                    continue
             
-            messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_request)
-            ]
-            
-            response = fallback_llm.invoke(messages)
-            
-            # 응답 추출
-            if hasattr(response, 'content'):
-                return response.content
-            elif isinstance(response, str):
-                return response
-            else:
-                return str(response)
+            # 모든 폴백 모델 실패
+            raise last_error if last_error else Exception("모든 폴백 모델 시도 실패")
                 
         except Exception as fallback_error:
-            logger.error(f"Titan Text 폴백도 실패: {fallback_error}")
+            logger.error(f"모든 폴백 모델 실패: {fallback_error}")
             return (
                 f"죄송합니다. AI 모델 응답 생성에 실패했습니다.\n\n"
                 f"원인: Claude 모델 사용을 위해 AWS Bedrock에서 Anthropic use case form 제출이 필요합니다.\n\n"
                 f"해결 방법:\n"
                 f"1. AWS 콘솔에서 Bedrock > Model access에서 Anthropic 모델에 대한 use case를 제출하세요.\n"
-                f"2. 또는 환경변수 MULTI_AGENT_BEDROCK_MODEL_ID를 'amazon.titan-text-express-v1'로 변경하세요.\n\n"
+                f"   - https://console.aws.amazon.com/bedrock/ 에서 Model access 페이지로 이동\n"
+                f"   - Anthropic Claude 모델을 선택하고 use case를 제출하세요.\n"
+                f"2. 또는 환경변수 MULTI_AGENT_BEDROCK_MODEL_ID를 다른 chat을 지원하는 모델로 변경하세요.\n"
+                f"   - 예: meta.llama3-8b-instruct-v1:0\n\n"
                 f"현재 질문: {user_request}"
             )
     
