@@ -634,64 +634,10 @@ class EC2Agent:
             else:
                 logger.warning(f"LLM 기반 요청 분석 중 오류: {error_msg}")
             
-            # 하이브리드 폴백: Embedding → Keywords
-            fallback_result = None
-            
-            # 1. Embedding 기반 의도 분류 시도
-            try:
-                from ..utils.intent_classifier import (
-                    classify_intent_hybrid,
-                    map_intent_to_action
-                )
-                
-                intent, classify_method, intent_confidence = classify_intent_hybrid(user_request)
-                if intent and intent_confidence >= 0.65:
-                    action = map_intent_to_action(intent)
-                    if action:
-                        # EC2 관련 액션만 처리
-                        if action.startswith('list_instances') or action == 'list_instances':
-                            fallback_result = {
-                                "action": "list_instances",
-                                "parameters": {},
-                                "reasoning": f"Embedding 기반 폴백: {intent} → {action}",
-                                "confidence": intent_confidence
-                            }
-                        elif action == 'create_instance':
-                            fallback_result = {
-                                "action": "create_instance",
-                                "parameters": {
-                                    "instance_type": "t2.micro",
-                                    "ami_id": "auto"
-                                },
-                                "reasoning": f"Embedding 기반 폴백: {intent} → {action}",
-                                "confidence": intent_confidence
-                            }
-                        elif action in ['stop_instance', 'start_instance', 'terminate_instance']:
-                            instance_ids = self._extract_instance_ids(user_request)
-                            fallback_result = {
-                                "action": action,
-                                "parameters": {
-                                    "InstanceIds": instance_ids if instance_ids else []
-                                },
-                                "reasoning": f"Embedding 기반 폴백: {intent} → {action}",
-                                "confidence": intent_confidence
-                            }
-                        
-                        if fallback_result:
-                            logger.info(
-                                f"✅ Embedding 기반 폴백 성공: '{user_request}' → {intent} → {action} "
-                                f"(신뢰도: {intent_confidence:.2f})"
-                            )
-            except ImportError:
-                logger.warning("Embedding 기반 의도 분류 모듈을 사용할 수 없습니다. 규칙 기반 폴백 사용.")
-            except Exception as embed_error:
-                logger.warning(f"Embedding 기반 의도 분류 실패: {embed_error}. 규칙 기반 폴백 사용.")
-            
-            # 2. Embedding 실패 시 규칙 기반 폴백
-            if not fallback_result:
-                logger.info("규칙 기반 폴백으로 전환하여 요청 분석 시도")
-                fallback_result = self._analyze_request_rule_based_fallback(user_request)
-                logger.info(f"규칙 기반 폴백 결과: {fallback_result.get('action')} - {fallback_result.get('parameters', {})}")
+            # LLM 실패 시 규칙 기반 폴백만 사용 (Embedding 제거)
+            logger.info("규칙 기반 폴백으로 전환하여 요청 분석 시도")
+            fallback_result = self._analyze_request_rule_based_fallback(user_request)
+            logger.info(f"규칙 기반 폴백 결과: {fallback_result.get('action')} - {fallback_result.get('parameters', {})}")
             
             return fallback_result
     

@@ -12,10 +12,19 @@
 import sys
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 # 프로젝트 루트를 Python 경로에 추가
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
+
+# .env 파일 명시적으로 로드 (프로젝트 루트 기준)
+env_file = project_root / ".env"
+if env_file.exists():
+    load_dotenv(dotenv_path=env_file, override=True)
+    print(f"✅ 환경 변수 파일 로드 완료: {env_file}")
+else:
+    print(f"⚠️  환경 변수 파일을 찾을 수 없습니다: {env_file}")
 
 if __name__ == "__main__":
     import uvicorn
