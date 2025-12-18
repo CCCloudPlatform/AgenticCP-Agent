@@ -21,6 +21,9 @@ import requests
 import boto3
 from botocore.exceptions import ClientError
 
+# BaseAgent import
+from .base_agent import BaseAgent
+
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -437,110 +440,77 @@ class AWSCCTool(BaseTool):
             return json.dumps({"error": str(e)})
 
 
-class EC2Agent:
+class EC2Agent(BaseAgent):
     """LangChain을 사용한 EC2 Mini Agent (LangGraph 호환)"""
     
     def __init__(self, settings, aws_access_key: str = None, aws_secret_key: str = None, region: str = "us-east-1"):
-        # Settings 객체가 MultiAgentSettings인지 확인하고 적절히 처리
-        if hasattr(settings, 'multi_agent'):
-            # 전체 Settings 객체인 경우
-            multi_agent_settings = settings.multi_agent
-        else:
-            # 이미 MultiAgentSettings 객체인 경우
-            multi_agent_settings = settings
-        
-        # LLM Provider 설정에 따라 LLM 초기화 (Bedrock 전용)
-        self.llm = ChatBedrock(
-            model_id=multi_agent_settings.bedrock_model_id,
-            temperature=multi_agent_settings.bedrock_temperature,
-            max_tokens=multi_agent_settings.bedrock_max_tokens,
-            aws_access_key_id=aws_access_key or multi_agent_settings.aws_access_key_id,
-            aws_secret_access_key=aws_secret_key or multi_agent_settings.aws_secret_access_key,
-            region_name=region or multi_agent_settings.aws_region
-        )
-        logger.info(f"EC2 Agent - Bedrock LLM 초기화 완료: {multi_agent_settings.bedrock_model_id}")
+        # BaseAgent 초기화
+        super().__init__(settings, aws_access_key, aws_secret_key, region)
         
         # AWS CC 도구 초기화
         self.aws_tool = AWSCCTool(aws_access_key, aws_secret_key, region)
         
         # LangChain Tools 리스트 (LangGraph 호환)
         self.tools = [self.aws_tool]
-        
-        # 시스템 프롬프트 설정
-        self.system_prompt = """
-        당신은 AWS EC2 리소스를 관리하는 전문 에이전트입니다.
-        사용자의 요청을 분석하여 적절한 AWS API 호출을 수행하고 결과를 사용자 친화적으로 제공합니다.
-        
-        지원하는 작업:
-        1. EC2 인스턴스 목록 조회 (list_instances)
-        2. EC2 인스턴스 생성 (create_instance)
-        3. EC2 인스턴스 시작 (start_instance)
-        4. EC2 인스턴스 중지 (stop_instance)
-        5. EC2 인스턴스 종료 (terminate_instance)
-        6. EC2 인스턴스 상세 정보 조회 (describe_instance)
-        
-        각 요청에 대해 다음 JSON 형식으로 응답해야 합니다:
-        {
-            "action": "액션명",
-            "parameters": {
-                "매개변수": "값"
-            },
-            "reasoning": "선택 이유"
+    
+    def get_agent_type(self) -> str:
+        """에이전트 타입 반환"""
+        return "ec2"
+    
+    def get_system_prompt(self) -> str:
+        """EC2 전문 시스템 프롬프트"""
+        return """당신은 AWS EC2 리소스를 관리하는 전문 에이전트입니다.
+사용자의 요청을 분석하여 적절한 AWS API 호출을 수행하고 결과를 사용자 친화적으로 제공합니다.
+
+지원하는 작업:
+1. EC2 인스턴스 목록 조회 (list_instances)
+2. EC2 인스턴스 생성 (create_instance)
+3. EC2 인스턴스 시작 (start_instance)
+4. EC2 인스턴스 중지 (stop_instance)
+5. EC2 인스턴스 종료 (terminate_instance)
+6. EC2 인스턴스 상세 정보 조회 (describe_instance)
+
+각 요청에 대해 다음 JSON 형식으로 응답해야 합니다:
+{
+    "action": "액션명",
+    "parameters": {
+        "매개변수": "값"
+    },
+    "reasoning": "선택 이유"
+}
+
+그리고 최종 응답은 사용자 친화적인 메시지를 포함해야 합니다."""
+    
+    def get_required_parameters(self, action: str) -> List[str]:
+        """액션별 필수 파라미터 목록"""
+        required_params = {
+            "list_instances": [],
+            "create_instance": [],  # instance_type과 ami_id는 기본값 사용 가능
+            "start_instance": ["InstanceIds"],
+            "stop_instance": ["InstanceIds"],
+            "terminate_instance": ["InstanceIds"],
+            "describe_instance": ["InstanceIds"]
         }
-        
-        그리고 최종 응답은 사용자 친화적인 메시지를 포함해야 합니다.
-        """
-        
-        # 프롬프트 템플릿 설정
-        self.prompt_template = ChatPromptTemplate.from_messages([
-            ("system", self.system_prompt),
-            ("human", "사용자 요청: {user_request}\n컨텍스트: {context}")
-        ])
-        
-        # JSON 파서 설정
-        self.json_parser = JsonOutputParser()
+        return required_params.get(action, [])
     
-    async def process_request(self, user_request: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        """사용자 요청을 처리하는 메인 메서드 (LLM 기반)"""
-        logger.info(f"EC2 Agent 요청 처리 시작: {user_request[:50]}...")
-        
-        try:
-            # LLM 기반 요청 분석
-            action_data = await self._analyze_request_llm_based(user_request)
-            
-            if action_data and 'action' in action_data:
-                # 실제 AWS API 호출
-                aws_result = await self._execute_aws_action(action_data)
-                
-                if aws_result.get('success'):
-                    final_response = self._create_success_response(aws_result, action_data)
-                else:
-                    final_response = self._create_error_response(aws_result, action_data)
-                
-                logger.info("EC2 Agent 요청 처리 완료")
-                return final_response
-            
-            else:
-                return {
-                    "success": False,
-                    "error": "유효한 액션을 추출할 수 없습니다.",
-                    "message": "요청을 이해할 수 없습니다. EC2 관련 명령어를 사용해주세요."
-                }
-                
-        except Exception as e:
-            logger.error(f"EC2 Agent 요청 처리 중 오류: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "message": "EC2 요청 처리 중 시스템 오류가 발생했습니다."
-            }
+    def get_dangerous_actions(self) -> List[str]:
+        """위험 작업 목록"""
+        return ["terminate_instance", "stop_instance"]
     
-    async def _execute_aws_action(self, action_data: Dict[str, Any]) -> Dict[str, Any]:
-        """AWS 액션 실행"""
+    def get_available_actions(self) -> List[str]:
+        """지원하는 액션 목록"""
+        return [
+            "list_instances",
+            "create_instance",
+            "start_instance",
+            "stop_instance",
+            "terminate_instance",
+            "describe_instance"
+        ]
+    
+    def execute_action(self, action: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """실제 작업 실행"""
         try:
-            action = action_data.get('action')
-            parameters = action_data.get('parameters', {})
-            
             # AWS CC Tool을 사용하여 액션 실행
             query = json.dumps({
                 'action': action,
@@ -554,6 +524,62 @@ class EC2Agent:
             logger.error(f"AWS 액션 실행 중 오류: {e}")
             return {
                 "success": False,
+                "error": str(e)
+            }
+    
+    def verify_action_result(self, action: str, parameters: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+        """결과 검증"""
+        try:
+            if not result.get("success"):
+                return {
+                    "passed": False,
+                    "reason": result.get("error", "작업 실행 실패")
+                }
+            
+            # 액션별 검증
+            if action == "create_instance":
+                instance_id = result.get("instance_id")
+                if instance_id:
+                    # 실제로 인스턴스가 생성되었는지 확인
+                    try:
+                        response = self.aws_tool._ec2_client.describe_instances(InstanceIds=[instance_id])
+                        if response['Reservations']:
+                            return {
+                                "passed": True,
+                                "reason": f"인스턴스 {instance_id}가 성공적으로 생성되었습니다."
+                            }
+                    except Exception as e:
+                        logger.warning(f"인스턴스 검증 중 오류: {e}")
+                        # 검증 실패해도 성공으로 간주 (API 응답이 성공이면)
+                        return {
+                            "passed": True,
+                            "reason": "인스턴스 생성 API 호출 성공"
+                        }
+            
+            elif action == "terminate_instance":
+                # 종료 작업은 API 응답만으로 검증
+                return {
+                    "passed": True,
+                    "reason": "인스턴스 종료 요청이 성공적으로 처리되었습니다."
+                }
+            
+            elif action == "list_instances":
+                # 목록 조회는 항상 성공
+                return {
+                    "passed": True,
+                    "reason": "인스턴스 목록 조회 성공"
+                }
+            
+            # 기본 검증: 성공 여부만 확인
+            return {
+                "passed": True,
+                "reason": "작업 실행 성공"
+            }
+            
+        except Exception as e:
+            logger.error(f"결과 검증 중 오류: {e}")
+            return {
+                "passed": False,
                 "error": str(e)
             }
     

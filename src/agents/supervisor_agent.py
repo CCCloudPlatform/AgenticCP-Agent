@@ -24,6 +24,8 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from .agent_factory import AgentFactory
+# Planner는 현재 사용하지 않음 (BaseAgent에서 처리)
+# from .planner import Planner
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -48,6 +50,7 @@ class AgentState(TypedDict):
     timestamp: str
     thread_id: str
     routing_result: Optional[Dict[str, Any]]
+    planning_result: Optional[Dict[str, Any]]  # Planning 노드 결과
     llm_output: Optional[str]
     final_response: Optional[str]
 
@@ -77,8 +80,21 @@ class SupervisorAgent:
         # Claude 모델인지 확인
         is_claude = "claude" in model_id.lower()
         
+        # Inference Profile 사용 여부 확인
+        use_inference_profile = getattr(settings, 'bedrock_use_inference_profile', False)
+        # Inference Profile ID 형식 감지 (리전.프로바이더.모델 형식 또는 특정 패턴)
+        is_inference_profile_id = (
+            use_inference_profile or 
+            "." in model_id and len(model_id.split(".")) >= 3 or
+            "claude-haiku-4-5" in model_id.lower() or
+            "claude-sonnet-4-5" in model_id.lower() or
+            "claude-opus-4-5" in model_id.lower()
+        )
+        
         if is_claude:
             # Claude 모델은 model_kwargs만 사용 (최상위 레벨 파라미터 제거)
+            # Inference Profile을 사용하는 경우 model_id를 그대로 사용
+            # ChatBedrock은 Inference Profile ID를 자동으로 감지하여 처리합니다
             self.llm = ChatBedrock(
                 model_id=model_id,
                 aws_access_key_id=aws_access_key or settings.aws_access_key_id,
@@ -89,6 +105,8 @@ class SupervisorAgent:
                     "max_tokens": settings.bedrock_max_tokens,
                 }
             )
+            if is_inference_profile_id:
+                logger.info(f"⚠️ Inference Profile 모드로 사용: {model_id}")
         else:
             # 다른 모델 (Titan Text, Llama 등)은 기본 설정 사용
             self.llm = ChatBedrock(
@@ -110,6 +128,9 @@ class SupervisorAgent:
         # Agent Factory를 통한 에이전트 관리
         self.agent_factory = AgentFactory()
         self.conversation_history: Dict[str, List[Dict[str, Any]]] = {}
+        
+        # Planner는 BaseAgent에서 처리하므로 여기서는 사용하지 않음
+        # self.planner = Planner(...)
         
         # 메모리 세이버 설정 (대화 상태 저장)
         self.memory = MemorySaver()
@@ -209,6 +230,7 @@ class SupervisorAgent:
                 state["context"]["confidence"] = confidence
                 
                 logger.info(f"요청 분석 완료 (LLM): {agent_type} - {reasoning} (신뢰도: {confidence:.2f})")
+                logger.debug(f"context 저장 확인: {state.get('context')}")
                 
             except Exception as e:
                 error_msg = str(e)
@@ -245,18 +267,28 @@ class SupervisorAgent:
                     intent, classify_method, intent_confidence = classify_intent_hybrid(user_request)
                     if intent:
                         mapped_agent_type = map_intent_to_agent_type(intent)
-                        if mapped_agent_type:
+                        if mapped_agent_type and intent_confidence >= 0.6:  # 신뢰도가 0.6 이상일 때만 사용
                             agent_type = mapped_agent_type
                             reasoning = f"Embedding 기반 폴백 (LLM 실패): {intent} → {agent_type}"
-                            confidence = intent_confidence
-                            method = f"embedding_{classify_method}"
-                            logger.info(f"Embedding 기반 의도 분류 성공: {intent} → {agent_type} (신뢰도: {confidence:.2f})")
+                            # Embedding confidence가 낮으면 키워드 기반으로 전환하기 위해 confidence를 낮게 설정
+                            # 키워드 기반 폴백으로 넘어가도록 함
+                            if intent_confidence < 0.7:
+                                logger.info(f"Embedding 신뢰도가 낮음 ({intent_confidence:.2f} < 0.7), 키워드 폴백으로 전환")
+                                agent_type = None  # 키워드 폴백으로 넘어가도록
+                            else:
+                                confidence = intent_confidence
+                                method = f"embedding_{classify_method}"
+                                logger.info(f"Embedding 기반 의도 분류 성공: {intent} → {agent_type} (신뢰도: {confidence:.2f})")
+                        else:
+                            if mapped_agent_type:
+                                logger.info(f"Embedding 신뢰도가 낮음 ({intent_confidence:.2f} < 0.6), 키워드 폴백으로 전환")
+                            agent_type = None  # 키워드 폴백으로 넘어가도록
                 except ImportError:
                     logger.warning("Embedding 기반 의도 분류 모듈을 사용할 수 없습니다. 키워드 폴백 사용.")
                 except Exception as embed_error:
                     logger.warning(f"Embedding 기반 의도 분류 실패: {embed_error}. 키워드 폴백 사용.")
                 
-                # 2. Embedding 실패 시 키워드 기반 폴백
+                # 2. Embedding 실패 또는 신뢰도 낮음 시 키워드 기반 폴백
                 if not agent_type:
                     user_request_lower = user_request.lower()
                     
@@ -285,10 +317,77 @@ class SupervisorAgent:
                     "context": {"method": method, "error": str(e)}
                 }
                 state["context"] = {"error": str(e), "confidence": confidence, "method": method}
+                logger.info(f"요청 분석 완료 (폴백): {agent_type} - {reasoning} (신뢰도: {confidence:.2f})")
+                logger.debug(f"context 저장 확인: {state.get('context')}")
             
             return state
         
-        # 2. Agent 라우팅 노드
+        # 2. Planning 노드 (신뢰도 >= 0.7일 때만 실행)
+        def planning(state: AgentState) -> AgentState:
+            """파라미터 추출 및 액션 계획 (LLM 기반)"""
+            logger.info("=" * 60)
+            logger.info("Planning 노드 실행 중...")
+            
+            try:
+                user_request = state.get("user_request", "")
+                next_agent = state.get("next_agent", "general")
+                context = state.get("context", {})
+                confidence = context.get("confidence", 0.0)
+                
+                logger.info(f"Planning 입력 확인: user_request={user_request[:50]}, next_agent={next_agent}, confidence={confidence:.2f}, context={context}")
+                
+                # 신뢰도가 0.7 미만이면 planning 건너뛰기
+                if confidence < 0.7:
+                    logger.info(f"⚠️ 신뢰도가 낮아 Planning 건너뜀: {confidence:.2f} < 0.7")
+                    state["planning_result"] = {
+                        "skipped": True,
+                        "reason": f"신뢰도가 낮음 ({confidence:.2f} < 0.7)"
+                    }
+                    return state
+                
+                # General Agent는 planning 불필요
+                if next_agent == AgentType.GENERAL.value:
+                    logger.info(f"⚠️ General Agent는 Planning 건너뜀: {next_agent}")
+                    state["planning_result"] = {
+                        "skipped": True,
+                        "reason": "General Agent는 Planning 불필요"
+                    }
+                    return state
+                
+                # Planning은 BaseAgent에서 처리하므로 여기서는 간단한 정보만 전달
+                logger.info(f"✅ Planning 실행 조건 충족: confidence={confidence:.2f} >= 0.7, agent={next_agent}")
+                
+                # BaseAgent가 자체적으로 파라미터를 추출하므로 여기서는 기본 정보만 설정
+                planning_result = {
+                    "action": None,  # BaseAgent에서 추출
+                    "parameters": {},
+                    "confidence": confidence,
+                    "skipped": False,
+                    "note": "파라미터 추출은 서브 에이전트의 LangGraph에서 처리됩니다."
+                }
+                
+                state["planning_result"] = planning_result
+                state["context"]["planning"] = planning_result
+                
+                logger.info(
+                    f"Planning 완료: action={planning_result.get('action')}, "
+                    f"confidence={planning_result.get('confidence', 0):.2f}"
+                )
+                
+                logger.info("=" * 60)
+                
+            except Exception as e:
+                logger.error(f"Planning 노드 실행 중 오류: {e}")
+                state["planning_result"] = {
+                    "action": None,
+                    "parameters": {},
+                    "error": str(e),
+                    "skipped": False
+                }
+            
+            return state
+        
+        # 3. Agent 라우팅 노드
         def route_to_agent(state: AgentState) -> AgentState:
             """분석 결과에 따라 적절한 Agent로 라우팅"""
             next_agent = state.get('next_agent', 'general')
@@ -296,9 +395,24 @@ class SupervisorAgent:
             
             try:
                 agent_type = next_agent
-                
                 user_request = state.get('user_request', '')
                 context = state.get('context', {})
+                planning_result = state.get('planning_result', {})
+                
+                # Planning 결과가 있으면 파라미터 전달
+                if planning_result and not planning_result.get('skipped', False):
+                    action = planning_result.get('action')
+                    parameters = planning_result.get('parameters', {})
+                    inferred_params = planning_result.get('inferred_parameters', {})
+                    
+                    # 파라미터 병합 (inferred_parameters 우선)
+                    merged_params = {**parameters, **inferred_params}
+                    
+                    # context에 planning 정보 추가
+                    context['planning'] = {
+                        'action': action,
+                        'parameters': merged_params
+                    }
                 
                 if agent_type == AgentType.EC2.value:
                     result = asyncio.run(self._handle_ec2_request(user_request, context))
@@ -309,7 +423,26 @@ class SupervisorAgent:
                 else:
                     result = self._handle_general_request(user_request, context)
                 
-                state['agent_result'] = result
+                # 재질문이나 확인이 필요한 경우 처리
+                if result.get("needs_clarification"):
+                    logger.info(f"{agent_type} Agent가 재질문 요청")
+                    state['agent_result'] = {
+                        "success": False,
+                        "needs_clarification": True,
+                        "reask_message": result.get("reask_message"),
+                        "missing_parameters": result.get("missing_parameters", [])
+                    }
+                elif result.get("needs_confirmation"):
+                    logger.info(f"{agent_type} Agent가 위험 작업 확인 요청")
+                    state['agent_result'] = {
+                        "success": False,
+                        "needs_confirmation": True,
+                        "confirmation_message": result.get("confirmation_message"),
+                        "action": result.get("action"),
+                        "parameters": result.get("parameters", {})
+                    }
+                else:
+                    state['agent_result'] = result
                 
             except Exception as e:
                 logger.error(f"Agent 라우팅 중 오류: {e}")
@@ -321,7 +454,7 @@ class SupervisorAgent:
             
             return state
         
-        # 3. 응답 생성 노드
+        # 4. 응답 생성 노드
         def generate_response(state: AgentState) -> AgentState:
             """최종 응답 생성"""
             logger.info("최종 응답 구성 중...")
@@ -332,7 +465,47 @@ class SupervisorAgent:
                 next_agent = state.get('next_agent', 'general')
                 context = state.get('context', {})
                 
-                if agent_result and agent_result.get("success"):
+                # 재질문이 필요한 경우
+                if agent_result.get("needs_clarification"):
+                    reask_message = agent_result.get("reask_message", "추가 정보가 필요합니다.")
+                    state['final_response'] = reask_message
+                    
+                    # 대화 기록에 재질문 추가
+                    self._add_to_history(
+                        thread_id,
+                        "assistant",
+                        reask_message,
+                        {
+                            "agent_used": next_agent,
+                            "type": "clarification_request",
+                            "missing_parameters": agent_result.get("missing_parameters", [])
+                        }
+                    )
+                    
+                    state['messages'].append(AIMessage(content=reask_message))
+                
+                # 위험 작업 확인이 필요한 경우
+                elif agent_result.get("needs_confirmation"):
+                    confirmation_message = agent_result.get("confirmation_message", "이 작업을 계속하시겠습니까?")
+                    state['final_response'] = confirmation_message
+                    
+                    # 대화 기록에 확인 요청 추가
+                    self._add_to_history(
+                        thread_id,
+                        "assistant",
+                        confirmation_message,
+                        {
+                            "agent_used": next_agent,
+                            "type": "confirmation_request",
+                            "action": agent_result.get("action"),
+                            "parameters": agent_result.get("parameters", {})
+                        }
+                    )
+                    
+                    state['messages'].append(AIMessage(content=confirmation_message))
+                
+                # 정상 처리 완료
+                elif agent_result and agent_result.get("success"):
                     final_message = agent_result.get('response', '처리가 완료되었습니다.')
                     state['final_response'] = final_message
                     
@@ -349,6 +522,8 @@ class SupervisorAgent:
                     
                     # AIMessage 추가
                     state['messages'].append(AIMessage(content=final_message))
+                
+                # 오류 발생
                 else:
                     error_msg = agent_result.get("error", "알 수 없는 오류") if agent_result else "처리 결과를 가져올 수 없습니다."
                     final_message = f"죄송합니다. 요청 처리 중 오류가 발생했습니다: {error_msg}"
@@ -375,17 +550,51 @@ class SupervisorAgent:
             
             return state
         
-        # 4. 그래프 구성
+        # 5. 그래프 구성
         graph = StateGraph(AgentState)
         
         # 노드 추가
         graph.add_node("analyze_request", analyze_request)
+        graph.add_node("planning", planning)
         graph.add_node("route_to_agent", route_to_agent)
         graph.add_node("generate_response", generate_response)
         
         # 엣지 추가
         graph.add_edge(START, "analyze_request")
-        graph.add_edge("analyze_request", "route_to_agent")
+        
+        # 조건부 엣지: 신뢰도 >= 0.7이면 planning, 아니면 바로 route_to_agent
+        def should_plan(state: AgentState) -> str:
+            """Planning 노드 실행 여부 결정"""
+            context = state.get("context", {})
+            confidence = context.get("confidence", 0.0)
+            next_agent = state.get("next_agent", "general")
+            
+            logger.info(f"🔍 should_plan 체크: confidence={confidence:.2f}, next_agent={next_agent}, context={context}")
+            
+            # 신뢰도가 0.7 이상이고 General Agent가 아니면 planning 실행
+            if confidence >= 0.7 and next_agent != AgentType.GENERAL.value:
+                logger.info(f"✅ Planning 노드로 라우팅: confidence={confidence:.2f} >= 0.7, agent={next_agent}")
+                return "planning"
+            else:
+                reason = []
+                if confidence < 0.7:
+                    reason.append(f"confidence={confidence:.2f} < 0.7")
+                if next_agent == AgentType.GENERAL.value:
+                    reason.append(f"agent={next_agent} (General)")
+                logger.info(f"⏭️ Planning 건너뛰고 route_to_agent로: {', '.join(reason) if reason else '알 수 없는 이유'}")
+                return "route_to_agent"
+        
+        graph.add_conditional_edges(
+            "analyze_request",
+            should_plan,
+            {
+                "planning": "planning",
+                "route_to_agent": "route_to_agent"
+            }
+        )
+        
+        # planning 후에는 항상 route_to_agent로
+        graph.add_edge("planning", "route_to_agent")
         graph.add_edge("route_to_agent", "generate_response")
         graph.add_edge("generate_response", END)
         
@@ -706,6 +915,7 @@ AWS 관련 질문이 아닌 일반적인 질문에도 자연스럽게 답변하�
                 timestamp=datetime.now().isoformat(),
                 thread_id=thread_id,
                 routing_result=None,
+                planning_result=None,
                 llm_output=None,
                 final_response=None
             )
@@ -770,6 +980,7 @@ AWS 관련 질문이 아닌 일반적인 질문에도 자연스럽게 답변하�
                 timestamp=datetime.now().isoformat(),
                 thread_id=thread_id,
                 routing_result=None,
+                planning_result=None,
                 llm_output=None,
                 final_response=None
             )
@@ -831,6 +1042,7 @@ AWS 관련 질문이 아닌 일반적인 질문에도 자연스럽게 답변하�
                 timestamp=datetime.now().isoformat(),
                 thread_id=thread_id,
                 routing_result=None,
+                planning_result=None,
                 llm_output=None,
                 final_response=None
             )

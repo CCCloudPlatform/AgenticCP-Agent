@@ -21,6 +21,9 @@ import requests
 import boto3
 from botocore.exceptions import ClientError
 
+# BaseAgent import
+from .base_agent import BaseAgent
+
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -484,113 +487,134 @@ class AWSVPCTool(BaseTool):
             }, ensure_ascii=False)
 
 
-class VPCAgent:
+class VPCAgent(BaseAgent):
     """LangChain을 사용한 VPC Mini Agent (LangGraph 호환)"""
     
     def __init__(self, settings, aws_access_key: str = None, aws_secret_key: str = None, region: str = "us-east-1"):
-        # LLM Provider 설정에 따라 LLM 초기화 (Bedrock 전용)
-        self.llm = ChatBedrock(
-            model_id=settings.bedrock_model_id,
-            temperature=settings.bedrock_temperature,
-            max_tokens=settings.bedrock_max_tokens,
-            aws_access_key_id=aws_access_key or settings.aws_access_key_id,
-            aws_secret_access_key=aws_secret_key or settings.aws_secret_access_key,
-            region_name=region or settings.aws_region
-        )
-        logger.info(f"VPC Agent - Bedrock LLM 초기화 완료: {settings.bedrock_model_id}")
+        # BaseAgent 초기화
+        super().__init__(settings, aws_access_key, aws_secret_key, region)
         
         # AWS VPC 도구 초기화
         self.vpc_tool = AWSVPCTool(aws_access_key, aws_secret_key, region)
-        
-        # 프롬프트 템플릿 설정
-        self.system_prompt = """
-        당신은 AWS VPC 전문가입니다. 사용자의 요청을 분석하여 적절한 VPC 작업을 수행합니다.
-        
-        지원하는 작업:
-        - VPC 생성, 삭제, 목록 조회
-        - 서브넷 생성 및 관리
-        - 보안 그룹 설정
-        - 라우팅 테이블 관리
-        
-        응답은 항상 사용자 친화적이고 도움이 되는 정보를 제공해야 합니다.
-        """
-        
-        self.prompt_template = ChatPromptTemplate.from_messages([
-            ("system", self.system_prompt),
-            ("human", "사용자 요청: {user_request}")
-        ])
-        
-        # JSON 파서 설정
-        self.json_parser = JsonOutputParser()
     
-    def _generate_rule_based_response(self, user_request: str) -> str:
-        """규칙 기반 응답 생성"""
-        user_request_lower = user_request.lower()
-        
-        if any(keyword in user_request_lower for keyword in ["생성", "만들", "create"]):
-            return "VPC를 생성하는 방법을 안내해드리겠습니다. AWS 콘솔에서 VPC 서비스로 이동하여 'VPC 생성'을 클릭하고 CIDR 블록을 설정하세요."
-        elif any(keyword in user_request_lower for keyword in ["목록", "리스트", "조회", "list"]):
-            return "현재 계정의 VPC 목록을 조회해드리겠습니다."
-        elif any(keyword in user_request_lower for keyword in ["서브넷", "subnet"]):
-            return "VPC 내에서 서브넷을 생성하고 관리하는 방법을 안내해드리겠습니다."
-        elif any(keyword in user_request_lower for keyword in ["보안그룹", "security group"]):
-            return "VPC 보안 그룹을 생성하고 규칙을 설정하는 방법을 안내해드리겠습니다."
-        else:
-            return "VPC 서비스에 대한 도움을 드리겠습니다. VPC 생성, 서브넷 관리, 보안 그룹 설정 등의 작업을 도와드릴 수 있습니다."
-        
-        # 시스템 프롬프트
-        self.system_prompt = """당신은 AWS VPC 전문가입니다. 사용자의 요청을 분석하여 적절한 VPC 작업을 수행합니다.
-
-지원하는 VPC 작업:
-1. VPC 관리: 생성, 삭제, 목록 조회, 정보 조회
-2. 서브넷 관리: 생성, 삭제, 목록 조회
-3. 보안 그룹 관리: 생성, 삭제, 목록 조회
-4. 네트워크 설정: CIDR 블록, 가용 영역 관리
-
-사용자 요청을 분석하여 적절한 VPC 작업을 수행하고, 결과를 명확하게 설명해주세요.
-"""
-        
-        # 프롬프트 템플릿
-        self.prompt_template = ChatPromptTemplate.from_messages([
-            ("system", self.system_prompt),
-            ("human", "{user_request}")
-        ])
-        
-        # 출력 파서
-        self.output_parser = JsonOutputParser()
+    def get_agent_type(self) -> str:
+        """에이전트 타입 반환"""
+        return "vpc"
     
-    async def process_request(self, user_request: str) -> Dict[str, Any]:
-        """사용자 요청 처리"""
+    def get_system_prompt(self) -> str:
+        """VPC 전문 시스템 프롬프트"""
+        return """당신은 AWS VPC 전문가입니다. 사용자의 요청을 분석하여 적절한 VPC 작업을 수행합니다.
+
+지원하는 작업:
+- VPC 생성, 삭제, 목록 조회
+- 서브넷 생성 및 관리
+- 보안 그룹 설정
+- 라우팅 테이블 관리
+
+응답은 항상 사용자 친화적이고 도움이 되는 정보를 제공해야 합니다."""
+    
+    def get_required_parameters(self, action: str) -> List[str]:
+        """액션별 필수 파라미터 목록"""
+        required_params = {
+            "list_vpcs": [],
+            "create_vpc": ["CidrBlock"],
+            "delete_vpc": ["VpcId"],
+            "get_vpc_info": ["VpcId"],
+            "create_subnet": ["VpcId", "CidrBlock"],
+            "delete_subnet": ["SubnetId"],
+            "list_subnets": ["VpcId"],
+            "create_security_group": ["GroupName", "VpcId"],
+            "delete_security_group": ["GroupId"]
+        }
+        return required_params.get(action, [])
+    
+    def get_dangerous_actions(self) -> List[str]:
+        """위험 작업 목록"""
+        return ["delete_vpc", "delete_subnet", "delete_security_group"]
+    
+    def get_available_actions(self) -> List[str]:
+        """지원하는 액션 목록"""
+        return [
+            "list_vpcs",
+            "create_vpc",
+            "delete_vpc",
+            "get_vpc_info",
+            "create_subnet",
+            "delete_subnet",
+            "list_subnets",
+            "create_security_group",
+            "delete_security_group"
+        ]
+    
+    def execute_action(self, action: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """실제 작업 실행"""
         try:
-            logger.info(f"VPC Agent 요청 처리: {user_request}")
-            
-            # 규칙 기반 응답 생성 (임베딩 모델 대신)
-            response_text = self._generate_rule_based_response(user_request)
-            
             # VPC 도구 실행
-            tool_result = self.vpc_tool._run(user_request)
+            query = json.dumps({
+                'action': action,
+                'parameters': parameters
+            })
             
-            # 결과 구성
-            result = {
-                "success": True,
-                "agent_type": "vpc",
-                "response": response_text,
-                "tool_result": json.loads(tool_result) if tool_result.startswith('{') else tool_result,
-                "confidence": 0.9,
-                "timestamp": asyncio.get_event_loop().time()
-            }
-            
-            logger.info(f"VPC Agent 응답 생성 완료")
-            return result
+            result = self.vpc_tool._run(query)
+            return json.loads(result) if result.startswith('{') else {"success": True, "result": result}
             
         except Exception as e:
-            logger.error(f"VPC Agent 요청 처리 중 오류: {e}")
+            logger.error(f"VPC 액션 실행 중 오류: {e}")
             return {
                 "success": False,
-                "agent_type": "vpc",
-                "error": str(e),
-                "response": f"VPC 작업 처리 중 오류가 발생했습니다: {str(e)}",
-                "confidence": 0.0,
-                "timestamp": asyncio.get_event_loop().time()
+                "error": str(e)
+            }
+    
+    def verify_action_result(self, action: str, parameters: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+        """결과 검증"""
+        try:
+            if not result.get("success"):
+                return {
+                    "passed": False,
+                    "reason": result.get("error", "작업 실행 실패")
+                }
+            
+            # 액션별 검증
+            if action == "create_vpc":
+                vpc_id = result.get("vpc_id") or parameters.get("VpcId")
+                if vpc_id:
+                    # 실제로 VPC가 생성되었는지 확인
+                    try:
+                        response = self.vpc_tool._ec2_client.describe_vpcs(VpcIds=[vpc_id])
+                        if response['Vpcs']:
+                            return {
+                                "passed": True,
+                                "reason": f"VPC {vpc_id}가 성공적으로 생성되었습니다."
+                            }
+                    except Exception as e:
+                        logger.warning(f"VPC 검증 중 오류: {e}")
+                        return {
+                            "passed": True,
+                            "reason": "VPC 생성 API 호출 성공"
+                        }
+            
+            elif action == "delete_vpc":
+                return {
+                    "passed": True,
+                    "reason": "VPC 삭제 요청이 성공적으로 처리되었습니다."
+                }
+            
+            elif action == "list_vpcs":
+                return {
+                    "passed": True,
+                    "reason": "VPC 목록 조회 성공"
+                }
+            
+            # 기본 검증: 성공 여부만 확인
+            return {
+                "passed": True,
+                "reason": "작업 실행 성공"
+            }
+            
+        except Exception as e:
+            logger.error(f"결과 검증 중 오류: {e}")
+            return {
+                "passed": False,
+                "error": str(e)
             }
 

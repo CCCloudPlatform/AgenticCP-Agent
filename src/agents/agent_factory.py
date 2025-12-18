@@ -6,32 +6,13 @@ Agent Factory
 
 import logging
 from typing import Dict, Any, Optional, Type
-from abc import ABC, abstractmethod
 
+from .base_agent import BaseAgent
 from .ec2_agent import EC2Agent
 from .s3_agent import S3Agent
 from .vpc_agent import VPCAgent
 
 logger = logging.getLogger(__name__)
-
-
-class BaseAgent(ABC):
-    """Base Agent 인터페이스"""
-    
-    @abstractmethod
-    async def process_request(self, user_request: str) -> Dict[str, Any]:
-        """사용자 요청 처리"""
-        pass
-    
-    @abstractmethod
-    def get_agent_type(self) -> str:
-        """에이전트 타입 반환"""
-        pass
-    
-    @abstractmethod
-    def get_capabilities(self) -> list:
-        """에이전트 기능 목록 반환"""
-        pass
 
 
 class AgentFactory:
@@ -93,10 +74,20 @@ class AgentFactory:
         agents_info = {}
         
         for agent_type, agent_class in cls._agents.items():
-            # 임시 인스턴스 생성하여 정보 수집
+            # 임시 인스턴스 생성하지 않고 클래스 정보만 사용
             try:
+                # 임시 설정 객체 생성 (최소한의 설정)
+                class TempSettings:
+                    bedrock_model_id = "temp"
+                    bedrock_temperature = 0.1
+                    bedrock_max_tokens = 1000
+                    aws_access_key_id = None
+                    aws_secret_access_key = None
+                    aws_region = "us-east-1"
+                
+                temp_settings = TempSettings()
                 temp_instance = agent_class(
-                    openai_api_key="temp",
+                    settings=temp_settings,
                     aws_access_key="temp",
                     aws_secret_key="temp"
                 )
@@ -105,7 +96,8 @@ class AgentFactory:
                     "name": agent_type.upper(),
                     "description": cls._get_agent_description(agent_type),
                     "capabilities": cls._get_agent_capabilities(agent_type),
-                    "class_name": agent_class.__name__
+                    "class_name": agent_class.__name__,
+                    "available_actions": temp_instance.get_available_actions() if hasattr(temp_instance, 'get_available_actions') else []
                 }
             except Exception as e:
                 logger.warning(f"에이전트 정보 수집 실패 ({agent_type}): {e}")
@@ -113,7 +105,8 @@ class AgentFactory:
                     "name": agent_type.upper(),
                     "description": f"{agent_type.upper()} Agent",
                     "capabilities": [],
-                    "class_name": agent_class.__name__
+                    "class_name": agent_class.__name__,
+                    "available_actions": []
                 }
         
         return agents_info
@@ -138,6 +131,7 @@ class AgentFactory:
                 "인스턴스 상태 확인",
                 "인스턴스 시작/중지",
                 "인스턴스 삭제",
+                "인스턴스 상세 정보 조회",
                 "AMI 관리",
                 "보안 그룹 관리"
             ],
@@ -149,12 +143,14 @@ class AgentFactory:
                 "객체 다운로드",
                 "객체 목록 조회",
                 "객체 삭제",
+                "버킷 정보 조회",
                 "버킷 정책 관리"
             ],
             "vpc": [
                 "VPC 생성",
                 "VPC 목록 조회",
                 "VPC 삭제",
+                "VPC 정보 조회",
                 "서브넷 생성",
                 "서브넷 목록 조회",
                 "서브넷 삭제",
