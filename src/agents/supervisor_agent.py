@@ -53,6 +53,10 @@ class AgentState(TypedDict):
     planning_result: Optional[Dict[str, Any]]  # Planning 노드 결과
     llm_output: Optional[str]
     final_response: Optional[str]
+    # Planning 관련 필드 (확장성)
+    planning_result: Optional[Dict[str, Any]]
+    tool_list: Optional[List[Dict[str, Any]]]
+    execution_plan: Optional[List[Dict[str, Any]]]
 
 
 class SupervisorAgent:
@@ -141,36 +145,44 @@ class SupervisorAgent:
     def _build_graph(self) -> StateGraph:
         """LangGraph 워크플로우 구성"""
         
-        # 1. 요청 분석 노드
+        # 1. 요청 분석 노드 (LLM 기반 라우팅)
         def analyze_request(state: AgentState) -> AgentState:
             """사용자 요청을 분석하여 적절한 Agent 결정 (LLM 기반)"""
-            logger.info("사용자 요청 분석 중...")
+            logger.info("사용자 요청 분석 중 (LLM 기반)...")
             
             try:
                 user_request = state.get("user_request", "")
+                
+                # 사용 가능한 Agent 및 Tool 정보 수집
+                available_agents = self.agent_factory.get_available_agents()
+                tool_list = self._get_tool_list(available_agents)
                 
                 # LLM을 사용하여 요청 분석 및 Agent 라우팅
                 routing_prompt = ChatPromptTemplate.from_messages([
                     ("system", """당신은 사용자 요청을 분석하여 적절한 전문 Agent로 라우팅하는 Supervisor Agent입니다.
 
-사용 가능한 Agent:
-1. ec2: EC2 인스턴스, 서버, AMI, 보안그룹, 인스턴스 생성/삭제/관리 관련
-2. s3: S3 버킷, 객체, 파일 스토리지, 업로드/다운로드 관련
-3. vpc: VPC, 서브넷, 네트워크, CIDR, 가용영역, 네트워크 설정 관련
-4. general: 일반적인 대화, 질문, 또는 위 카테고리에 해당하지 않는 요청
+사용 가능한 Agent 및 Tool:
+{agent_tool_info}
 
 사용자 요청의 의도와 맥락을 분석하여 가장 적절한 Agent를 선택하세요.
 응답은 반드시 다음 JSON 형식으로 제공해야 합니다:
 {{
     "agent_type": "ec2|s3|vpc|general",
     "reasoning": "선택 이유를 간단히 설명",
-    "confidence": 0.0-1.0 사이의 숫자
+    "confidence": 0.0-1.0 사이의 숫자,
+    "suggested_tools": ["tool1", "tool2"] (선택 사항, 해당 Agent의 유용한 도구 목록)
 }}"""),
                     ("human", "사용자 요청: {user_request}")
                 ])
                 
+                # Agent 및 Tool 정보 포맷팅
+                agent_tool_info = self._format_agent_tool_info(available_agents, tool_list)
+                
                 # LLM 호출
-                messages = routing_prompt.format_messages(user_request=user_request)
+                messages = routing_prompt.format_messages(
+                    user_request=user_request,
+                    agent_tool_info=agent_tool_info
+                )
                 response = self.llm.invoke(messages)
                 
                 # 응답 파싱
@@ -188,6 +200,7 @@ class SupervisorAgent:
                     agent_type = analysis.get("agent_type", "general").lower()
                     reasoning = analysis.get("reasoning", "LLM 분석 결과")
                     confidence = float(analysis.get("confidence", 0.7))
+                    suggested_tools = analysis.get("suggested_tools", [])
                     
                     # 유효한 agent_type인지 확인
                     valid_agents = ["ec2", "s3", "vpc", "general"]
@@ -197,35 +210,22 @@ class SupervisorAgent:
                         confidence = 0.5
                     
                 except (json.JSONDecodeError, ValueError, KeyError) as e:
-                    logger.warning(f"LLM 응답 파싱 실패, 규칙 기반 폴백 사용: {e}")
+                    logger.warning(f"LLM 응답 파싱 실패, 키워드 기반 폴백 사용: {e}")
                     # 폴백: 간단한 키워드 기반 분석
-                    user_request_lower = user_request.lower()
-                    if any(kw in user_request_lower for kw in ["ec2", "인스턴스", "서버", "ami"]):
-                        agent_type = "ec2"
-                        reasoning = "키워드 기반 폴백: EC2 관련"
-                        confidence = 0.7
-                    elif any(kw in user_request_lower for kw in ["s3", "버킷", "객체", "스토리지"]):
-                        agent_type = "s3"
-                        reasoning = "키워드 기반 폴백: S3 관련"
-                        confidence = 0.7
-                    elif any(kw in user_request_lower for kw in ["vpc", "서브넷", "네트워크"]):
-                        agent_type = "vpc"
-                        reasoning = "키워드 기반 폴백: VPC 관련"
-                        confidence = 0.7
-                    else:
-                        agent_type = "general"
-                        reasoning = "키워드 기반 폴백: 일반 요청"
-                        confidence = 0.5
+                    agent_type, reasoning, confidence = self._keyword_based_fallback(user_request)
+                    suggested_tools = []
                 
                 analysis = {
                     "agent_type": agent_type,
                     "reasoning": reasoning,
                     "confidence": confidence,
+                    "suggested_tools": suggested_tools,
                     "context": {"method": "llm_based", "raw_response": response_text[:200]}
                 }
                 
                 state["routing_result"] = analysis
                 state["next_agent"] = agent_type
+                state["tool_list"] = tool_list
                 state["context"] = analysis.get("context", {})
                 state["context"]["confidence"] = confidence
                 
@@ -234,87 +234,74 @@ class SupervisorAgent:
                 
             except Exception as e:
                 error_msg = str(e)
+                logger.warning(f"LLM 기반 요청 분석 중 오류 발생: {e}")
                 
-                # 예상된 오류인지 확인 (Bedrock use case form 제출 안 됨)
-                is_expected_error = (
-                    "use case details" in error_msg.lower() or
-                    "resourcenotfoundexception" in error_msg.lower()
-                )
-                
-                if is_expected_error:
-                    logger.debug(
-                        f"LLM 사용 불가 (예상된 오류): Bedrock use case form 미제출. "
-                        f"Embedding 기반 폴백으로 전환합니다."
-                    )
-                else:
-                    logger.warning(f"요청 분석 중 오류 발생: {e}")
-                
-                # LLM 실패 시 하이브리드 폴백: Embedding → Keywords
+                # LLM 실패 시 키워드 기반 폴백만 사용 (Embedding 제거)
                 user_request = state.get("user_request", "")
-                
-                agent_type = None
-                reasoning = ""
-                confidence = 0.5
-                method = "keyword_fallback"
-                
-                # 1. Embedding 기반 의도 분류 시도
-                try:
-                    from ..utils.intent_classifier import (
-                        classify_intent_hybrid,
-                        map_intent_to_agent_type
-                    )
-                    
-                    intent, classify_method, intent_confidence = classify_intent_hybrid(user_request)
-                    if intent:
-                        mapped_agent_type = map_intent_to_agent_type(intent)
-                        if mapped_agent_type and intent_confidence >= 0.6:  # 신뢰도가 0.6 이상일 때만 사용
-                            agent_type = mapped_agent_type
-                            reasoning = f"Embedding 기반 폴백 (LLM 실패): {intent} → {agent_type}"
-                            # Embedding confidence가 낮으면 키워드 기반으로 전환하기 위해 confidence를 낮게 설정
-                            # 키워드 기반 폴백으로 넘어가도록 함
-                            if intent_confidence < 0.7:
-                                logger.info(f"Embedding 신뢰도가 낮음 ({intent_confidence:.2f} < 0.7), 키워드 폴백으로 전환")
-                                agent_type = None  # 키워드 폴백으로 넘어가도록
-                            else:
-                                confidence = intent_confidence
-                                method = f"embedding_{classify_method}"
-                                logger.info(f"Embedding 기반 의도 분류 성공: {intent} → {agent_type} (신뢰도: {confidence:.2f})")
-                        else:
-                            if mapped_agent_type:
-                                logger.info(f"Embedding 신뢰도가 낮음 ({intent_confidence:.2f} < 0.6), 키워드 폴백으로 전환")
-                            agent_type = None  # 키워드 폴백으로 넘어가도록
-                except ImportError:
-                    logger.warning("Embedding 기반 의도 분류 모듈을 사용할 수 없습니다. 키워드 폴백 사용.")
-                except Exception as embed_error:
-                    logger.warning(f"Embedding 기반 의도 분류 실패: {embed_error}. 키워드 폴백 사용.")
-                
-                # 2. Embedding 실패 또는 신뢰도 낮음 시 키워드 기반 폴백
-                if not agent_type:
-                    user_request_lower = user_request.lower()
-                    
-                    if any(kw in user_request_lower for kw in ["ec2", "인스턴스", "서버", "ami", "ec2 정보", "ec2정보"]):
-                        agent_type = "ec2"
-                        reasoning = f"키워드 기반 폴백 (LLM 실패): EC2 관련 - {str(e)[:100]}"
-                        confidence = 0.8
-                    elif any(kw in user_request_lower for kw in ["s3", "버킷", "객체", "스토리지"]):
-                        agent_type = "s3"
-                        reasoning = f"키워드 기반 폴백 (LLM 실패): S3 관련 - {str(e)[:100]}"
-                        confidence = 0.8
-                    elif any(kw in user_request_lower for kw in ["vpc", "서브넷", "네트워크"]):
-                        agent_type = "vpc"
-                        reasoning = f"키워드 기반 폴백 (LLM 실패): VPC 관련 - {str(e)[:100]}"
-                        confidence = 0.8
-                    else:
-                        agent_type = AgentType.GENERAL.value
-                        reasoning = f"키워드 기반 폴백 (LLM 실패): 일반 요청 - {str(e)[:100]}"
-                        confidence = 0.5
+                agent_type, reasoning, confidence = self._keyword_based_fallback(user_request)
                 
                 state["next_agent"] = agent_type
                 state["routing_result"] = {
                     "agent_type": agent_type,
                     "reasoning": reasoning,
                     "confidence": confidence,
-                    "context": {"method": method, "error": str(e)}
+                    "context": {"method": "keyword_fallback", "error": str(e)}
+                }
+                state["context"] = {"error": str(e), "confidence": confidence, "method": "keyword_fallback"}
+            
+            return state
+        
+        # 2. Planning 노드 (확장성을 위해 추가, 현재는 라우팅만 수행)
+        def plan_execution(state: AgentState) -> AgentState:
+            """실행 계획 수립 (현재는 라우팅만 수행, 나중에 확장 가능)"""
+            logger.info("실행 계획 수립 중...")
+            
+            try:
+                user_request = state.get("user_request", "")
+                next_agent = state.get("next_agent", "general")
+                routing_result = state.get("routing_result", {})
+                tool_list = state.get("tool_list", [])
+                
+                # 현재는 단순히 라우팅 결과를 그대로 전달
+                # 나중에 복잡한 multi-step planning을 추가할 수 있음
+                # 예: "vpc 다음에 ec2를 만들어야 합니다" 같은 경우
+                
+                execution_plan = [{
+                    "step": 1,
+                    "agent": next_agent,
+                    "action": "route",
+                    "description": f"요청을 {next_agent} agent로 라우팅",
+                    "tools": [tool for tool in tool_list if tool.get("agent") == next_agent]
+                }]
+                
+                planning_result = {
+                    "plan_type": "simple_routing",  # 나중에 "multi_step", "sequence" 등으로 확장 가능
+                    "execution_plan": execution_plan,
+                    "estimated_steps": len(execution_plan),
+                    "context": {
+                        "routing_confidence": routing_result.get("confidence", 0.5),
+                        "suggested_tools": routing_result.get("suggested_tools", [])
+                    }
+                }
+                
+                state["planning_result"] = planning_result
+                state["execution_plan"] = execution_plan
+                
+                logger.info(f"실행 계획 수립 완료: {next_agent} agent로 라우팅")
+                
+            except Exception as e:
+                logger.error(f"실행 계획 수립 중 오류: {e}")
+                # 오류 발생 시 기본 라우팅 계획 생성
+                state["planning_result"] = {
+                    "plan_type": "simple_routing",
+                    "execution_plan": [{
+                        "step": 1,
+                        "agent": state.get("next_agent", "general"),
+                        "action": "route",
+                        "description": "기본 라우팅"
+                    }],
+                    "estimated_steps": 1,
+                    "error": str(e)
                 }
                 state["context"] = {"error": str(e), "confidence": confidence, "method": method}
                 logger.info(f"요청 분석 완료 (폴백): {agent_type} - {reasoning} (신뢰도: {confidence:.2f})")
@@ -387,6 +374,7 @@ class SupervisorAgent:
             
             return state
         
+        # 3. Agent 라우팅 노드
         # 3. Agent 라우팅 노드
         def route_to_agent(state: AgentState) -> AgentState:
             """분석 결과에 따라 적절한 Agent로 라우팅"""
@@ -551,50 +539,19 @@ class SupervisorAgent:
             return state
         
         # 5. 그래프 구성
+        # 5. 그래프 구성
         graph = StateGraph(AgentState)
         
         # 노드 추가
         graph.add_node("analyze_request", analyze_request)
-        graph.add_node("planning", planning)
+        graph.add_node("plan_execution", plan_execution)
         graph.add_node("route_to_agent", route_to_agent)
         graph.add_node("generate_response", generate_response)
         
         # 엣지 추가
         graph.add_edge(START, "analyze_request")
-        
-        # 조건부 엣지: 신뢰도 >= 0.7이면 planning, 아니면 바로 route_to_agent
-        def should_plan(state: AgentState) -> str:
-            """Planning 노드 실행 여부 결정"""
-            context = state.get("context", {})
-            confidence = context.get("confidence", 0.0)
-            next_agent = state.get("next_agent", "general")
-            
-            logger.info(f"🔍 should_plan 체크: confidence={confidence:.2f}, next_agent={next_agent}, context={context}")
-            
-            # 신뢰도가 0.7 이상이고 General Agent가 아니면 planning 실행
-            if confidence >= 0.7 and next_agent != AgentType.GENERAL.value:
-                logger.info(f"✅ Planning 노드로 라우팅: confidence={confidence:.2f} >= 0.7, agent={next_agent}")
-                return "planning"
-            else:
-                reason = []
-                if confidence < 0.7:
-                    reason.append(f"confidence={confidence:.2f} < 0.7")
-                if next_agent == AgentType.GENERAL.value:
-                    reason.append(f"agent={next_agent} (General)")
-                logger.info(f"⏭️ Planning 건너뛰고 route_to_agent로: {', '.join(reason) if reason else '알 수 없는 이유'}")
-                return "route_to_agent"
-        
-        graph.add_conditional_edges(
-            "analyze_request",
-            should_plan,
-            {
-                "planning": "planning",
-                "route_to_agent": "route_to_agent"
-            }
-        )
-        
-        # planning 후에는 항상 route_to_agent로
-        graph.add_edge("planning", "route_to_agent")
+        graph.add_edge("analyze_request", "plan_execution")
+        graph.add_edge("plan_execution", "route_to_agent")
         graph.add_edge("route_to_agent", "generate_response")
         graph.add_edge("generate_response", END)
         
@@ -685,6 +642,48 @@ class SupervisorAgent:
                 "error": str(e),
                 "message": "VPC Agent 처리 중 오류가 발생했습니다."
             }
+    
+    def _keyword_based_fallback(self, user_request: str) -> tuple:
+        """키워드 기반 폴백 (LLM 실패 시)"""
+        user_request_lower = user_request.lower()
+        
+        if any(kw in user_request_lower for kw in ["ec2", "인스턴스", "서버", "ami"]):
+            return "ec2", "키워드 기반 폴백: EC2 관련", 0.7
+        elif any(kw in user_request_lower for kw in ["s3", "버킷", "객체", "스토리지"]):
+            return "s3", "키워드 기반 폴백: S3 관련", 0.7
+        elif any(kw in user_request_lower for kw in ["vpc", "서브넷", "네트워크"]):
+            return "vpc", "키워드 기반 폴백: VPC 관련", 0.7
+        else:
+            return "general", "키워드 기반 폴백: 일반 요청", 0.5
+    
+    def _get_tool_list(self, available_agents: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """사용 가능한 Tool 목록 생성"""
+        tool_list = []
+        
+        for agent_type, agent_info in available_agents.items():
+            capabilities = agent_info.get("capabilities", [])
+            for capability in capabilities:
+                tool_list.append({
+                    "name": f"{agent_type}_{capability.lower().replace(' ', '_')}",
+                    "agent": agent_type,
+                    "description": capability,
+                    "category": agent_type
+                })
+        
+        return tool_list
+    
+    def _format_agent_tool_info(self, available_agents: Dict[str, Dict[str, Any]], tool_list: List[Dict[str, Any]]) -> str:
+        """Agent 및 Tool 정보를 포맷팅"""
+        info_lines = []
+        
+        for agent_type, agent_info in available_agents.items():
+            info_lines.append(f"\n{agent_type.upper()} Agent:")
+            info_lines.append(f"  설명: {agent_info.get('description', '')}")
+            info_lines.append(f"  기능:")
+            for capability in agent_info.get("capabilities", []):
+                info_lines.append(f"    - {capability}")
+        
+        return "\n".join(info_lines)
     
     def _handle_general_request(self, user_request: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
         """일반 요청 처리 (규칙 기반)"""
@@ -917,7 +916,10 @@ AWS 관련 질문이 아닌 일반적인 질문에도 자연스럽게 답변하�
                 routing_result=None,
                 planning_result=None,
                 llm_output=None,
-                final_response=None
+                final_response=None,
+                planning_result=None,
+                tool_list=None,
+                execution_plan=None
             )
             
             # LangGraph 실행 (체크포인터 없이)
@@ -982,7 +984,10 @@ AWS 관련 질문이 아닌 일반적인 질문에도 자연스럽게 답변하�
                 routing_result=None,
                 planning_result=None,
                 llm_output=None,
-                final_response=None
+                final_response=None,
+                planning_result=None,
+                tool_list=None,
+                execution_plan=None
             )
             
             # LangGraph 비동기 실행 (체크포인터 없이)
@@ -1044,7 +1049,10 @@ AWS 관련 질문이 아닌 일반적인 질문에도 자연스럽게 답변하�
                 routing_result=None,
                 planning_result=None,
                 llm_output=None,
-                final_response=None
+                final_response=None,
+                planning_result=None,
+                tool_list=None,
+                execution_plan=None
             )
             
             # LangGraph 스트리밍 실행 (체크포인터 없이)
