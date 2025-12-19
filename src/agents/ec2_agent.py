@@ -121,17 +121,34 @@ class AWSCCTool(BaseTool):
             return json.dumps({"error": str(e)})
     
     def _create_instance(self, parameters: Dict[str, Any]) -> str:
-        """EC2 인스턴스 생성 (AWS Cloud Control API 사용)"""
+        """EC2 인스턴스 생성 (Cloud Control API 우선 사용, 비동기 작업 완료 대기)"""
         try:
-            # AMI ID가 제공되지 않거나 "auto"인 경우 최신 Amazon Linux 2 AMI 조회
+            # AMI ID 정리 및 검증
             ami_id = parameters.get('ami_id') or parameters.get('ImageId')
-            if not ami_id or ami_id == 'ami-0abcdef1234567890' or ami_id == 'auto':
+            # 예시 텍스트나 유효하지 않은 값 필터링
+            if (not ami_id or 
+                ami_id == 'ami-0abcdef1234567890' or 
+                ami_id == 'auto' or
+                '<' in str(ami_id) or  # 예시 텍스트 감지
+                '예:' in str(ami_id)):  # 한국어 예시 텍스트 감지
                 ami_id = self._get_latest_amazon_linux_ami()
             
-            # AWS Cloud Control API를 사용한 인스턴스 생성 (올바른 리소스 모델 사용)
+            # 인스턴스 타입 정리 및 검증
+            instance_type = parameters.get('instance_type') or parameters.get('InstanceType', 't2.micro')
+            # 예시 텍스트나 유효하지 않은 값 필터링
+            instance_type_str = str(instance_type)
+            if ('<' in instance_type_str or  # 예시 텍스트 감지
+                '예:' in instance_type_str or  # 한국어 예시 텍스트 감지
+                not any(instance_type_str.startswith(prefix) for prefix in ['t', 'm', 'c', 'r', 'x', 'i', 'g', 'p'])):  # 유효한 인스턴스 타입 패턴 확인
+                instance_type = 't2.micro'  # 기본값 사용
+                logger.info(f"인스턴스 타입 '{instance_type_str}'이 유효하지 않아 기본값 t2.micro를 사용합니다.")
+            
+            logger.info(f"Cloud Control API를 사용하여 인스턴스 생성 시도 - AMI: {ami_id}, Type: {instance_type}")
+            
+            # AWS Cloud Control API를 사용한 인스턴스 생성
             resource_model = {
                 "ImageId": ami_id,
-                "InstanceType": parameters.get('instance_type') or parameters.get('InstanceType', 't2.micro'),
+                "InstanceType": instance_type,
                 "Tags": [
                     {
                         "Key": "Name",
@@ -148,22 +165,82 @@ class AWSCCTool(BaseTool):
             if parameters.get('SubnetId'):
                 resource_model["SubnetId"] = parameters.get('SubnetId')
             
-            logger.info(f"EC2 인스턴스 생성 시도 - AMI: {ami_id}, Type: {resource_model['InstanceType']}")
-            
             # Cloud Control API를 사용한 리소스 생성
-            response = self._cloudcontrol_client.create_resource(
-                TypeName='AWS::EC2::Instance',
-                DesiredState=json.dumps(resource_model)
-            )
+            logger.info(f"Cloud Control API create_resource 호출 시작. ResourceModel: {json.dumps(resource_model, ensure_ascii=False)}")
+            try:
+                response = self._cloudcontrol_client.create_resource(
+                    TypeName='AWS::EC2::Instance',
+                    DesiredState=json.dumps(resource_model)
+                )
+                logger.info("Cloud Control API create_resource 호출 성공")
+                logger.debug(f"Cloud Control API 응답: {json.dumps(response, default=str, ensure_ascii=False)}")
+            except ClientError as cc_error:
+                error_code = cc_error.response.get('Error', {}).get('Code', 'Unknown')
+                error_message = cc_error.response.get('Error', {}).get('Message', str(cc_error))
+                logger.error(f"Cloud Control API 호출 실패 - Error Code: {error_code}, Message: {error_message}")
+                raise
+            except Exception as cc_error:
+                logger.error(f"Cloud Control API 호출 중 예상치 못한 오류: {cc_error}")
+                import traceback
+                logger.error(f"스택 트레이스: {traceback.format_exc()}")
+                raise
             
-            # 응답에서 인스턴스 ID 추출 (Cloud Control API 응답 구조 확인)
+            # 응답에서 인스턴스 ID 추출
+            instance_id = None
+            request_token = None
+            operation_status = None
+            
+            # 1. ResourceDescription에서 인스턴스 ID 추출 (동기 응답)
             if 'ResourceDescription' in response:
-                resource_description = json.loads(response['ResourceDescription']['Properties'])
-                instance_id = resource_description.get('InstanceId')
-            else:
-                # Cloud Control API 응답이 예상과 다른 경우
-                logger.warning(f"Cloud Control API 응답 구조가 예상과 다름: {response}")
-                instance_id = response.get('Identifier', 'unknown')
+                resource_description = response['ResourceDescription']
+                logger.info("Cloud Control API가 동기 응답을 반환했습니다.")
+                
+                if 'Properties' in resource_description:
+                    properties = json.loads(resource_description['Properties'])
+                    instance_id = properties.get('InstanceId')
+                    logger.info(f"ResourceDescription.Properties에서 인스턴스 ID 추출: {instance_id}")
+                elif 'Identifier' in resource_description:
+                    instance_id = resource_description['Identifier']
+                    logger.info(f"ResourceDescription.Identifier에서 인스턴스 ID 추출: {instance_id}")
+            
+            # 2. ProgressEvent에서 인스턴스 ID 추출 (비동기 응답)
+            elif 'ProgressEvent' in response:
+                progress_event = response['ProgressEvent']
+                request_token = progress_event.get('RequestToken')
+                operation_status = progress_event.get('OperationStatus')
+                
+                logger.info(f"Cloud Control API가 비동기 응답을 반환했습니다. Status: {operation_status}, RequestToken: {request_token}")
+                
+                # ProgressEvent에서 즉시 인스턴스 ID 확인
+                if 'Identifier' in progress_event:
+                    instance_id = progress_event['Identifier']
+                    logger.info(f"ProgressEvent.Identifier에서 인스턴스 ID 추출: {instance_id}")
+                elif 'ResourceModel' in progress_event:
+                    resource_model_data = json.loads(progress_event['ResourceModel'])
+                    instance_id = resource_model_data.get('InstanceId')
+                    if instance_id:
+                        logger.info(f"ProgressEvent.ResourceModel에서 인스턴스 ID 추출: {instance_id}")
+                
+                # 비동기 작업이고 인스턴스 ID가 없는 경우, 완료까지 대기
+                if operation_status == 'IN_PROGRESS' and not instance_id and request_token:
+                    logger.info(f"비동기 작업 완료를 대기합니다. RequestToken: {request_token}")
+                    instance_id = self._wait_for_async_operation(request_token, parameters, ami_id)
+                    
+                    # 비동기 작업이 실패하거나 타임아웃된 경우 EC2 API로 폴백
+                    if not instance_id:
+                        logger.warning("비동기 작업이 실패하거나 타임아웃되었습니다. EC2 API로 폴백합니다.")
+                        return self._create_instance_ec2_fallback(parameters, ami_id)
+            
+            # 3. 직접 Identifier가 있는 경우
+            elif 'Identifier' in response:
+                instance_id = response['Identifier']
+                logger.info(f"직접 Identifier에서 인스턴스 ID 추출: {instance_id}")
+            
+            # 인스턴스 ID를 찾지 못한 경우 EC2 API로 폴백
+            if not instance_id or instance_id == 'unknown':
+                logger.warning(f"Cloud Control API 응답에서 인스턴스 ID를 찾을 수 없습니다. EC2 API로 폴백합니다.")
+                logger.debug(f"Cloud Control API 응답: {json.dumps(response, default=str)}")
+                return self._create_instance_ec2_fallback(parameters, ami_id)
             
             # datetime 객체를 문자열로 변환하여 JSON 직렬화 문제 해결
             def convert_datetime(obj):
@@ -180,32 +257,149 @@ class AWSCCTool(BaseTool):
             return json.dumps({
                 "success": True,
                 "instance_id": instance_id,
-                "message": f"인스턴스 {instance_id}가 성공적으로 생성되었습니다.",
+                "message": f"인스턴스 {instance_id}가 Cloud Control API로 성공적으로 생성되었습니다.",
                 "ami_id": ami_id,
-                "instance_type": resource_model['InstanceType'],
+                "instance_type": instance_type,
                 "response": safe_response
             })
             
         except Exception as e:
             logger.error(f"Cloud Control API 인스턴스 생성 중 오류: {e}")
+            import traceback
+            logger.error(f"스택 트레이스: {traceback.format_exc()}")
             
             # 폴백: 일반 EC2 API 사용
             try:
                 logger.info("EC2 API로 폴백 시도...")
+                # AMI ID가 아직 설정되지 않은 경우 다시 조회
+                if 'ami_id' not in locals():
+                    ami_id = parameters.get('ami_id') or parameters.get('ImageId')
+                    if (not ami_id or 
+                        ami_id == 'ami-0abcdef1234567890' or 
+                        ami_id == 'auto' or
+                        '<' in str(ami_id) or
+                        '예:' in str(ami_id)):
+                        ami_id = self._get_latest_amazon_linux_ami()
                 return self._create_instance_ec2_fallback(parameters, ami_id)
             except Exception as fallback_error:
                 logger.error(f"EC2 API 폴백도 실패: {fallback_error}")
                 return json.dumps({"error": str(e), "fallback_error": str(fallback_error)})
     
+    def _wait_for_async_operation(self, request_token: str, parameters: Dict[str, Any], ami_id: str, max_wait_time: int = 60) -> Optional[str]:
+        """비동기 Cloud Control API 작업 완료 대기
+        
+        Args:
+            request_token: Cloud Control API RequestToken
+            parameters: 인스턴스 생성 파라미터 (폴백용)
+            ami_id: AMI ID (폴백용)
+            max_wait_time: 최대 대기 시간 (초)
+        
+        Returns:
+            인스턴스 ID 또는 None (실패 시)
+        """
+        import time
+        
+        wait_interval = 2  # 2초마다 확인
+        waited_time = 0
+        
+        logger.info(f"비동기 작업 완료 대기 시작. RequestToken: {request_token}, 최대 대기 시간: {max_wait_time}초")
+        
+        while waited_time < max_wait_time:
+            try:
+                logger.debug(f"작업 상태 확인 중... ({waited_time}/{max_wait_time}초)")
+                status_response = self._cloudcontrol_client.get_resource_request_status(
+                    RequestToken=request_token
+                )
+                
+                status_event = status_response.get('ProgressEvent', {})
+                current_status = status_event.get('OperationStatus')
+                status_message = status_event.get('StatusMessage', '')
+                error_code = status_event.get('ErrorCode')
+                
+                logger.info(f"작업 상태 확인 ({waited_time}초 경과): Status={current_status}, Message={status_message}, ErrorCode={error_code}")
+                
+                if error_code:
+                    logger.warning(f"작업에 오류 코드가 있습니다: {error_code}")
+                
+                if current_status == 'SUCCESS':
+                    # 성공적으로 완료됨
+                    logger.info("Cloud Control API 비동기 작업이 성공적으로 완료되었습니다.")
+                    
+                    # 인스턴스 ID 추출 시도
+                    if 'Identifier' in status_event:
+                        instance_id = status_event['Identifier']
+                        logger.info(f"작업 완료 - 인스턴스 ID: {instance_id}")
+                        return instance_id
+                    elif 'ResourceModel' in status_event:
+                        resource_model_data = json.loads(status_event['ResourceModel'])
+                        instance_id = resource_model_data.get('InstanceId')
+                        if instance_id:
+                            logger.info(f"작업 완료 - 인스턴스 ID: {instance_id}")
+                            return instance_id
+                    
+                    # Identifier가 없으면 EC2 API로 폴백
+                    logger.warning("작업은 성공했지만 인스턴스 ID를 찾을 수 없습니다. EC2 API로 폴백합니다.")
+                    return None
+                    
+                elif current_status in ['FAILED', 'CANCEL_IN_PROGRESS', 'CANCEL_COMPLETE']:
+                    # 작업 실패 또는 취소됨
+                    error_message = status_message or '작업이 실패했습니다.'
+                    logger.warning(f"Cloud Control API 비동기 작업 실패: {error_message}")
+                    logger.debug(f"실패 상세 정보: {json.dumps(status_event, default=str)}")
+                    return None
+                
+                # IN_PROGRESS 상태면 계속 대기
+                elif current_status == 'IN_PROGRESS':
+                    logger.debug(f"작업 진행 중... ({waited_time}/{max_wait_time}초)")
+                    time.sleep(wait_interval)
+                    waited_time += wait_interval
+                    continue
+                
+                else:
+                    # 알 수 없는 상태
+                    logger.warning(f"알 수 없는 작업 상태: {current_status}. 계속 대기합니다.")
+                    time.sleep(wait_interval)
+                    waited_time += wait_interval
+                    continue
+                    
+            except ClientError as status_error:
+                error_code = status_error.response.get('Error', {}).get('Code', 'Unknown')
+                error_message = status_error.response.get('Error', {}).get('Message', str(status_error))
+                logger.error(f"Cloud Control API 작업 상태 확인 중 ClientError 발생 - Code: {error_code}, Message: {error_message}")
+                logger.debug(f"전체 응답: {status_error.response}")
+                # 일시적 오류일 수 있으므로 계속 시도
+                time.sleep(wait_interval)
+                waited_time += wait_interval
+                continue
+            except Exception as status_error:
+                logger.error(f"Cloud Control API 작업 상태 확인 중 예상치 못한 오류: {status_error}")
+                import traceback
+                logger.error(f"스택 트레이스: {traceback.format_exc()}")
+                # 예상치 못한 오류는 즉시 반환
+                return None
+        
+        # 타임아웃
+        logger.warning(f"Cloud Control API 비동기 작업이 {max_wait_time}초 내에 완료되지 않았습니다. 타임아웃.")
+        return None
+    
     def _create_instance_ec2_fallback(self, parameters: Dict[str, Any], ami_id: str) -> str:
         """EC2 API 폴백 메서드"""
         try:
+            # 인스턴스 타입 정리 및 검증
+            instance_type = parameters.get('instance_type') or parameters.get('InstanceType', 't2.micro')
+            # 예시 텍스트나 유효하지 않은 값 필터링
+            if ('<' in str(instance_type) or  # 예시 텍스트 감지
+                '예:' in str(instance_type) or  # 한국어 예시 텍스트 감지
+                not (instance_type.startswith('t') or instance_type.startswith('m') or instance_type.startswith('c') or instance_type.startswith('r') or instance_type.startswith('x'))):  # 유효한 인스턴스 타입 패턴 확인
+                instance_type = 't2.micro'  # 기본값 사용
+                logger.info(f"인스턴스 타입이 유효하지 않아 기본값 t2.micro를 사용합니다.")
+            
             # 기본 파라미터 설정
             run_instances_params = {
                 'ImageId': ami_id,
                 'MinCount': 1,
                 'MaxCount': 1,
-                'InstanceType': parameters.get('instance_type') or parameters.get('InstanceType', 't2.micro'),
+                'InstanceType': instance_type,
                 'TagSpecifications': [
                     {
                         'ResourceType': 'instance',
@@ -471,13 +665,13 @@ class EC2Agent(BaseAgent):
 6. EC2 인스턴스 상세 정보 조회 (describe_instance)
 
 각 요청에 대해 다음 JSON 형식으로 응답해야 합니다:
-{
+{{
     "action": "액션명",
-    "parameters": {
+    "parameters": {{
         "매개변수": "값"
-    },
+    }},
     "reasoning": "선택 이유"
-}
+}}
 
 그리고 최종 응답은 사용자 친화적인 메시지를 포함해야 합니다."""
     

@@ -45,6 +45,133 @@ class SubAgentState(TypedDict):
 class BaseAgent(ABC):
     """LangGraph 기반 Base Agent 클래스"""
     
+    @staticmethod
+    def _extract_json_from_text(text: str) -> Optional[str]:
+        """텍스트에서 JSON을 추출하는 헬퍼 함수
+        
+        마크다운 코드 블록을 제거하고 중첩된 JSON을 올바르게 추출합니다.
+        """
+        import re
+        
+        # 1. 마크다운 코드 블록 제거 (```json ... ``` 또는 ``` ... ```)
+        text = re.sub(r'```(?:json)?\s*\n?(.*?)\n?```', r'\1', text, flags=re.DOTALL)
+        
+        # 2. 중첩된 JSON 추출을 위한 스택 기반 파싱
+        json_start = -1
+        brace_count = 0
+        
+        for i, char in enumerate(text):
+            if char == '{':
+                if json_start == -1:
+                    json_start = i
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0 and json_start != -1:
+                    # 완전한 JSON 객체 찾음
+                    json_str = text[json_start:i+1]
+                    # 유효한 JSON인지 확인
+                    try:
+                        json.loads(json_str)
+                        return json_str
+                    except json.JSONDecodeError:
+                        # 다음 JSON 객체 찾기 위해 계속
+                        json_start = -1
+                        brace_count = 0
+        
+        # 3. 스택 기반 파싱이 실패한 경우, 첫 번째 { 부터 마지막 } 까지 시도
+        first_brace = text.find('{')
+        last_brace = text.rfind('}')
+        
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            json_str = text[first_brace:last_brace+1]
+            try:
+                json.loads(json_str)
+                return json_str
+            except json.JSONDecodeError:
+                pass
+        
+        return None
+    
+    def _safe_extract_llm_content(self, response: Any) -> str:
+        """LLM 응답에서 content를 안전하게 추출하는 헬퍼 함수
+        
+        다양한 LLM 응답 형식을 처리하고, 오류 발생 시 상세한 정보를 로깅합니다.
+        """
+        import traceback
+        try:
+            # 응답 타입과 내용을 먼저 로깅
+            logger.info(f"{self.get_agent_type()} Agent - LLM 응답 타입: {type(response)}")
+            logger.info(f"{self.get_agent_type()} Agent - LLM 응답 repr: {repr(response)[:500]}")
+            
+            # 1. content 속성이 있는 경우
+            if hasattr(response, 'content'):
+                try:
+                    content = response.content
+                    logger.info(f"{self.get_agent_type()} Agent - content 타입: {type(content)}")
+                    if content is None:
+                        logger.warning(f"{self.get_agent_type()} Agent - LLM 응답 content가 None입니다.")
+                        return ""
+                    return str(content)
+                except (AttributeError, KeyError) as e:
+                    logger.error(f"{self.get_agent_type()} Agent - content 속성 접근 오류: {e}, 타입: {type(e).__name__}")
+                    logger.error(f"{self.get_agent_type()} Agent - 스택 트레이스: {traceback.format_exc()}")
+                    # 계속 진행
+            
+            # 2. 문자열인 경우
+            if isinstance(response, str):
+                return response
+            
+            # 3. dict 형태인 경우 - 안전하게 처리
+            if isinstance(response, dict):
+                logger.info(f"{self.get_agent_type()} Agent - dict 키 목록: {list(response.keys())}")
+                try:
+                    # content 키 확인
+                    if 'content' in response:
+                        content = response['content']
+                        if content is not None:
+                            return str(content)
+                    
+                    # text 키 확인
+                    if 'text' in response:
+                        text = response['text']
+                        if text is not None:
+                            return str(text)
+                    
+                    # dict 전체를 문자열로 변환
+                    logger.debug(f"{self.get_agent_type()} Agent - LLM 응답이 dict 형태입니다: {list(response.keys())}")
+                    return json.dumps(response, ensure_ascii=False)
+                except (KeyError, TypeError) as e:
+                    logger.error(f"{self.get_agent_type()} Agent - dict 처리 중 오류: {e}, 타입: {type(e).__name__}")
+                    logger.error(f"{self.get_agent_type()} Agent - dict 키: {list(response.keys()) if isinstance(response, dict) else 'N/A'}")
+                    logger.error(f"{self.get_agent_type()} Agent - 스택 트레이스: {traceback.format_exc()}")
+                    # dict 전체를 문자열로 변환 시도
+                    try:
+                        return json.dumps(response, ensure_ascii=False)
+                    except:
+                        return str(response)
+            
+            # 4. 기타 경우 - 문자열로 변환 시도
+            try:
+                response_str = str(response)
+                logger.debug(f"{self.get_agent_type()} Agent - LLM 응답을 문자열로 변환: {type(response).__name__}")
+                return response_str
+            except Exception as e:
+                logger.debug(f"{self.get_agent_type()} Agent - 문자열 변환 실패: {e}")
+                return f"응답 처리 중 오류 발생: {type(response).__name__}"
+            
+        except Exception as e:
+            logger.error(f"{self.get_agent_type()} Agent - LLM 응답 content 추출 중 오류: {e}")
+            logger.error(f"{self.get_agent_type()} Agent - 오류 타입: {type(e).__name__}")
+            logger.error(f"{self.get_agent_type()} Agent - 응답 객체 타입: {type(response)}")
+            logger.error(f"{self.get_agent_type()} Agent - 응답 객체: {response}")
+            logger.error(f"{self.get_agent_type()} Agent - 전체 스택 트레이스: {traceback.format_exc()}")
+            # 최후의 수단: 전체 응답을 문자열로 변환
+            try:
+                return str(response)
+            except:
+                return f"응답 처리 중 오류 발생: {str(e)}"
+    
     def __init__(self, settings, aws_access_key: str = None, aws_secret_key: str = None, region: str = "us-east-1"):
         # Settings 객체가 MultiAgentSettings인지 확인하고 적절히 처리
         if hasattr(settings, 'multi_agent'):
@@ -126,9 +253,18 @@ class BaseAgent(ABC):
                 ])
                 
                 messages = thinking_prompt.format_messages(user_request=user_request)
+                logger.debug(f"{self.get_agent_type()} Agent - LLM 호출 시작 (생각 노드)")
+                
                 response = self.llm.invoke(messages)
                 
-                thinking_text = response.content if hasattr(response, 'content') else str(response)
+                logger.info(f"{self.get_agent_type()} Agent - LLM 응답 수신 완료, 타입: {type(response).__name__}")
+                logger.info(f"{self.get_agent_type()} Agent - LLM 응답 객체: {response}")
+                logger.info(f"{self.get_agent_type()} Agent - LLM 응답 속성: {dir(response) if hasattr(response, '__dict__') else 'N/A'}")
+                
+                # 안전한 content 추출
+                thinking_text = self._safe_extract_llm_content(response)
+                
+                logger.info(f"{self.get_agent_type()} Agent - 추출된 thinking 텍스트 길이: {len(thinking_text)}")
                 
                 state["thinking_result"] = {
                     "thinking": thinking_text,
@@ -138,10 +274,14 @@ class BaseAgent(ABC):
                 logger.info(f"{self.get_agent_type()} Agent - 생각 완료")
                 
             except Exception as e:
+                import traceback
                 logger.error(f"생각 노드 실행 중 오류: {e}")
+                logger.error(f"생각 노드 오류 타입: {type(e).__name__}")
+                logger.error(f"생각 노드 전체 스택 트레이스: {traceback.format_exc()}")
                 state["thinking_result"] = {
                     "thinking": f"요청 분석 중 오류 발생: {str(e)}",
-                    "error": str(e)
+                    "error": str(e),
+                    "error_type": type(e).__name__
                 }
             
             return state
@@ -162,14 +302,18 @@ class BaseAgent(ABC):
 {json.dumps(self.get_available_actions(), ensure_ascii=False, indent=2)}
 
 사용자 요청에서 액션과 필요한 파라미터를 추출하세요.
-응답은 다음 JSON 형식으로 제공해야 합니다:
-{{
+응답은 반드시 순수 JSON 형식으로만 제공해야 합니다. 마크다운 코드 블록(```json ... ```)이나 다른 텍스트 없이 JSON만 반환하세요.
+
+응답 형식:
+{{{{
     "action": "액션명",
-    "parameters": {{
+    "parameters": {{{{
         "파라미터명": "값"
-    }},
+    }}}},
     "reasoning": "추출 이유"
-}}"""),
+}}}}
+
+중요: 응답은 순수 JSON만 포함해야 하며, 마크다운 코드 블록이나 설명 텍스트를 포함하지 마세요."""),
                     ("human", "사용자 요청: {user_request}\n생각 결과: {thinking}")
                 ])
                 
@@ -178,18 +322,31 @@ class BaseAgent(ABC):
                     user_request=user_request,
                     thinking=thinking_text
                 )
+                logger.debug(f"{self.get_agent_type()} Agent - LLM 호출 시작 (파라미터 추출 노드)")
                 response = self.llm.invoke(messages)
                 
-                response_text = response.content if hasattr(response, 'content') else str(response)
+                logger.debug(f"{self.get_agent_type()} Agent - LLM 응답 수신 완료, 타입: {type(response).__name__}")
+                logger.debug(f"{self.get_agent_type()} Agent - LLM 응답 객체: {response}")
+                logger.debug(f"{self.get_agent_type()} Agent - LLM 응답 속성: {dir(response) if hasattr(response, '__dict__') else 'N/A'}")
+                
+                # 안전한 content 추출
+                response_text = self._safe_extract_llm_content(response)
+                
+                logger.debug(f"{self.get_agent_type()} Agent - 추출된 응답 텍스트 길이: {len(response_text)}")
+                logger.debug(f"{self.get_agent_type()} Agent - 추출된 응답 텍스트 (처음 500자): {response_text[:500]}")
                 
                 # JSON 추출 시도
                 try:
-                    import re
-                    json_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
-                    if json_match:
-                        response_text = json_match.group(0)
+                    # 개선된 JSON 추출 로직 사용
+                    json_str = self._extract_json_from_text(response_text)
                     
-                    extracted_data = json.loads(response_text)
+                    if json_str is None:
+                        logger.warning(f"{self.get_agent_type()} Agent - JSON을 찾을 수 없습니다. 원본 응답: {response_text[:500]}")
+                        raise ValueError(f"JSON을 찾을 수 없습니다. 원본 응답: {response_text[:200]}")
+                    
+                    logger.debug(f"{self.get_agent_type()} Agent - 추출된 JSON 문자열: {json_str[:200]}")
+                    
+                    extracted_data = json.loads(json_str)
                     action = extracted_data.get("action")
                     parameters = extracted_data.get("parameters", {})
                     
@@ -198,13 +355,28 @@ class BaseAgent(ABC):
                     
                     logger.info(f"{self.get_agent_type()} Agent - 파라미터 추출 완료: action={action}")
                     
-                except (json.JSONDecodeError, ValueError, KeyError) as e:
-                    logger.warning(f"파라미터 추출 파싱 실패: {e}")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"파라미터 추출 JSON 파싱 실패: {e}")
+                    logger.warning(f"JSON 파싱 오류 위치: line {e.lineno}, column {e.colno if hasattr(e, 'colno') else 'N/A'}")
+                    logger.debug(f"원본 LLM 응답: {response_text}")
+                    logger.debug(f"추출 시도한 JSON 문자열: {self._extract_json_from_text(response_text) if response_text else None}")
+                    state["extracted_parameters"] = {}
+                    state["action"] = None
+                except ValueError as e:
+                    logger.warning(f"파라미터 추출 값 오류: {e}")
+                    logger.debug(f"원본 LLM 응답: {response_text}")
+                    state["extracted_parameters"] = {}
+                    state["action"] = None
+                except KeyError as e:
+                    logger.warning(f"파라미터 추출 키 오류: {e}")
+                    logger.debug(f"원본 LLM 응답: {response_text}")
                     state["extracted_parameters"] = {}
                     state["action"] = None
                 
             except Exception as e:
                 logger.error(f"파라미터 추출 노드 실행 중 오류: {e}")
+                logger.error(f"파라미터 추출 노드 오류 타입: {type(e).__name__}")
+                logger.debug(f"파라미터 추출 노드 오류 상세: {str(e)}", exc_info=True)
                 state["extracted_parameters"] = {}
                 state["action"] = None
             
@@ -260,15 +432,27 @@ class BaseAgent(ABC):
                     action=action,
                     missing_params=", ".join(missing_params)
                 )
+                
+                logger.debug(f"{self.get_agent_type()} Agent - LLM 호출 시작 (재질문 노드)")
                 response = self.llm.invoke(messages)
                 
-                reask_message = response.content if hasattr(response, 'content') else str(response)
+                logger.debug(f"{self.get_agent_type()} Agent - LLM 응답 수신 완료, 타입: {type(response).__name__}")
+                logger.debug(f"{self.get_agent_type()} Agent - LLM 응답 객체: {response}")
+                logger.debug(f"{self.get_agent_type()} Agent - LLM 응답 속성: {dir(response) if hasattr(response, '__dict__') else 'N/A'}")
+                
+                # 안전한 content 추출
+                reask_message = self._safe_extract_llm_content(response)
+                
+                logger.debug(f"{self.get_agent_type()} Agent - 추출된 재질문 메시지 길이: {len(reask_message)}")
+                
                 state["reask_message"] = reask_message
                 
                 logger.info(f"{self.get_agent_type()} Agent - 재질문 생성 완료")
                 
             except Exception as e:
                 logger.error(f"재질문 노드 실행 중 오류: {e}")
+                logger.error(f"재질문 노드 오류 타입: {type(e).__name__}")
+                logger.debug(f"재질문 노드 오류 상세: {str(e)}", exc_info=True)
                 state["reask_message"] = f"다음 정보가 필요합니다: {', '.join(state.get('missing_parameters', []))}"
             
             return state
@@ -297,9 +481,17 @@ class BaseAgent(ABC):
                         action=action,
                         parameters=json.dumps(parameters, ensure_ascii=False)
                     )
+                    
+                    logger.debug(f"{self.get_agent_type()} Agent - LLM 호출 시작 (위험 작업 체크 노드)")
                     response = self.llm.invoke(messages)
                     
-                    confirmation_message = response.content if hasattr(response, 'content') else str(response)
+                    logger.debug(f"{self.get_agent_type()} Agent - LLM 응답 수신 완료, 타입: {type(response).__name__}")
+                    
+                    # 안전한 content 추출
+                    confirmation_message = self._safe_extract_llm_content(response)
+                    
+                    logger.debug(f"{self.get_agent_type()} Agent - 추출된 확인 메시지 길이: {len(confirmation_message)}")
+                    
                     state["confirmation_message"] = confirmation_message
                     
                     logger.info(f"{self.get_agent_type()} Agent - 위험 작업 감지: {action}")
@@ -309,6 +501,8 @@ class BaseAgent(ABC):
                 
             except Exception as e:
                 logger.error(f"위험 작업 체크 노드 실행 중 오류: {e}")
+                logger.error(f"위험 작업 체크 노드 오류 타입: {type(e).__name__}")
+                logger.debug(f"위험 작업 체크 노드 오류 상세: {str(e)}", exc_info=True)
                 state["is_dangerous_action"] = False
                 state["dangerous_action_confirmed"] = True
             
@@ -416,23 +610,53 @@ class BaseAgent(ABC):
             logger.info(f"{self.get_agent_type()} Agent - 응답 생성 노드 실행 중...")
             
             try:
+                import re
                 action_result = state.get("action_result", {})
                 verification_passed = state.get("verification_passed", False)
                 
                 if verification_passed and action_result.get("success"):
-                    # 성공 응답 생성
-                    response_prompt = ChatPromptTemplate.from_messages([
-                        ("system", self.get_system_prompt() + "\n\n작업이 성공적으로 완료되었습니다. 사용자에게 친절하게 결과를 알려주세요."),
-                        ("human", "작업 결과: {result}\n\n사용자에게 전달할 응답을 생성하세요.")
-                    ])
-                    
-                    messages = response_prompt.format_messages(
-                        result=json.dumps(action_result, ensure_ascii=False, indent=2)
-                    )
-                    response = self.llm.invoke(messages)
-                    final_response = response.content if hasattr(response, 'content') else str(response)
-                    
-                    state["final_response"] = final_response
+                    # action_result에 message가 있으면 우선 사용
+                    if action_result.get("message"):
+                        state["final_response"] = action_result.get("message")
+                    else:
+                        # LLM을 사용하여 간결한 응답 생성
+                        action = state.get("action", "")
+                        response_prompt = ChatPromptTemplate.from_messages([
+                            ("system", """당신은 AWS 리소스 관리 전문가입니다. 
+작업 결과를 사용자에게 간결하고 명확하게 알려주세요.
+중요: 
+- JSON 형식이 아닌 일반 텍스트로만 응답하세요
+- reasoning 태그나 JSON 구조를 사용하지 마세요
+- 2-3문장으로 간결하게 작성하세요
+- 핵심 정보(인스턴스 ID, 상태 등)만 포함하세요"""),
+                            ("human", "작업: {action}\n작업 결과: {result}\n\n위 결과를 바탕으로 간결하고 명확한 응답을 생성하세요. 2-3문장으로만 작성하세요.")
+                        ])
+                        
+                        messages = response_prompt.format_messages(
+                            action=action,
+                            result=json.dumps(action_result, ensure_ascii=False, indent=2)
+                        )
+                        
+                        logger.debug(f"{self.get_agent_type()} Agent - LLM 호출 시작 (응답 생성 노드)")
+                        response = self.llm.invoke(messages)
+                        
+                        logger.debug(f"{self.get_agent_type()} Agent - LLM 응답 수신 완료, 타입: {type(response).__name__}")
+                        
+                        # 안전한 content 추출
+                        final_response = self._safe_extract_llm_content(response)
+                        
+                        # reasoning 태그나 JSON 구조가 포함되어 있으면 제거
+                        # <reasoning>...</reasoning> 태그 제거
+                        final_response = re.sub(r'<reasoning>.*?</reasoning>', '', final_response, flags=re.DOTALL)
+                        # JSON 구조 제거 (중괄호로 시작하는 부분)
+                        json_match = re.search(r'\{.*\}', final_response, re.DOTALL)
+                        if json_match:
+                            # JSON 부분만 제거하고 나머지 텍스트만 사용
+                            final_response = final_response.replace(json_match.group(0), '').strip()
+                        
+                        logger.debug(f"{self.get_agent_type()} Agent - 추출된 최종 응답 길이: {len(final_response)}")
+                        
+                        state["final_response"] = final_response.strip()
                 else:
                     # 실패 응답
                     error_msg = action_result.get("error", "알 수 없는 오류")
@@ -442,6 +666,8 @@ class BaseAgent(ABC):
                 
             except Exception as e:
                 logger.error(f"응답 생성 노드 실행 중 오류: {e}")
+                logger.error(f"응답 생성 노드 오류 타입: {type(e).__name__}")
+                logger.debug(f"응답 생성 노드 오류 상세: {str(e)}", exc_info=True)
                 state["final_response"] = "응답 생성 중 오류가 발생했습니다."
             
             return state
