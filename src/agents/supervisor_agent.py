@@ -54,7 +54,6 @@ class AgentState(TypedDict):
     llm_output: Optional[str]
     final_response: Optional[str]
     # Planning 관련 필드 (확장성)
-    planning_result: Optional[Dict[str, Any]]
     tool_list: Optional[List[Dict[str, Any]]]
     execution_plan: Optional[List[Dict[str, Any]]]
 
@@ -303,9 +302,10 @@ class SupervisorAgent:
                     "estimated_steps": 1,
                     "error": str(e)
                 }
-                state["context"] = {"error": str(e), "confidence": confidence, "method": method}
-                logger.info(f"요청 분석 완료 (폴백): {agent_type} - {reasoning} (신뢰도: {confidence:.2f})")
-                logger.debug(f"context 저장 확인: {state.get('context')}")
+                # context 업데이트 (기존 context 유지)
+                current_context = state.get("context", {})
+                current_context["error"] = str(e)
+                state["context"] = current_context
             
             return state
         
@@ -917,7 +917,6 @@ AWS 관련 질문이 아닌 일반적인 질문에도 자연스럽게 답변하�
                 planning_result=None,
                 llm_output=None,
                 final_response=None,
-                planning_result=None,
                 tool_list=None,
                 execution_plan=None
             )
@@ -985,7 +984,6 @@ AWS 관련 질문이 아닌 일반적인 질문에도 자연스럽게 답변하�
                 planning_result=None,
                 llm_output=None,
                 final_response=None,
-                planning_result=None,
                 tool_list=None,
                 execution_plan=None
             )
@@ -1050,7 +1048,6 @@ AWS 관련 질문이 아닌 일반적인 질문에도 자연스럽게 답변하�
                 planning_result=None,
                 llm_output=None,
                 final_response=None,
-                planning_result=None,
                 tool_list=None,
                 execution_plan=None
             )
